@@ -326,6 +326,14 @@ class SRTPlatform(DeviceMixin):
         attn_tp_size // attn_dcp_size, not only the full-attention paged pool."""
         return False
 
+    def dcp_stripes_over_attn_cp(self) -> bool:
+        """Whether decode context parallelism stripes the KV cache over the
+        attention context-parallel group (``dcp_size == attn_cp_size``) rather
+        than over consecutive ranks inside attention TP. DCP then sees attention
+        CP x TP as its TP width: PCP4 x TP2 with DCP4 is laid out like TP8 with
+        DCP4, q/o_proj replicated across the DCP group."""
+        return False
+
     def dcp_replicates_q_heads(self) -> bool:
         """Whether ``--dcp-replicate-q-proj`` applies to GQA/MHA attention."""
         return False

@@ -1549,6 +1549,21 @@ class ModelConfig:
             return max(per_layer)
         return self.num_attention_heads
 
+    def _dcp_tp_size(self, tensor_parallel_size: int, dcp_size: int) -> int:
+        """The TP width decode context parallelism sees.
+
+        On a platform whose DCP group is the attention context-parallel group
+        (``dcp_stripes_over_attn_cp``, with ``dcp_size == attn_cp_size``), DCP
+        treats attention CP x TP as its TP group: PCP4 x TP2 with DCP4 is laid
+        out like TP8 with DCP4 (q/o_proj replicated across the DCP group).
+        """
+        if dcp_size > 1:
+            from sglang.srt.platforms import current_platform
+
+            if current_platform.dcp_stripes_over_attn_cp():
+                return tensor_parallel_size * dcp_size
+        return tensor_parallel_size
+
     def get_num_kv_heads(self, tensor_parallel_size: int, dcp_size: int = 1) -> int:
         """Number of KV heads per GPU.
 
@@ -1559,6 +1574,7 @@ class ModelConfig:
         total_num_kv_heads = self.get_total_num_kv_heads()
         if self.is_draft_model:
             dcp_size = 1
+        tensor_parallel_size = self._dcp_tp_size(tensor_parallel_size, dcp_size)
         kv_tensor_parallel_size = tensor_parallel_size // dcp_size
         return max(1, total_num_kv_heads // kv_tensor_parallel_size)
 
@@ -1566,6 +1582,7 @@ class ModelConfig:
         """Similar to get_num_kv_heads(), but for SWA."""
         if self.is_draft_model:
             dcp_size = 1
+        tensor_parallel_size = self._dcp_tp_size(tensor_parallel_size, dcp_size)
         kv_tensor_parallel_size = tensor_parallel_size // dcp_size
         if hasattr(self.hf_text_config, "swa_num_key_value_heads"):
             total_num_kv_heads = self.hf_text_config.swa_num_key_value_heads
