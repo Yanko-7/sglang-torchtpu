@@ -605,6 +605,11 @@ class TpuEnvs:
     # EP in-kernel xprof regions: 1 per phase, 2 per expert chunk / arm too.
     SGLANG_TPU_EP_TRACE = EnvInt(0)
 
+    # DeepSeek-V4.1: boot on dummy weights and load the --load-format weights
+    # from --model-path while the direct tracer's SPMD compiles run
+    # (models/deepseek_v41/deferred_load.py).
+    SGLANG_TPU_DSV41_DEFERRED_LOAD = EnvBool(False)
+
     @classmethod
     def names(cls) -> list[str]:
         return sorted(
