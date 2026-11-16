@@ -32,7 +32,9 @@ def _make_self(*, page_size: int, full_available: int, swa_available: int):
     def set_full_to_swa_mapping(
         full_indices: torch.Tensor, swa_indices: torch.Tensor
     ) -> None:
-        full_to_swa_index_mapping[full_indices] = swa_indices
+        full_to_swa_index_mapping[full_indices.to(torch.int64)] = swa_indices.to(
+            full_to_swa_index_mapping.dtype
+        )
 
     return SimpleNamespace(
         page_size=page_size,
@@ -70,6 +72,22 @@ def _call(stub, *, prefix_lens_cpu, seq_lens_cpu, extend_num_tokens):
 class TestSWAAllocExtendPageEstimation(CustomTestCase):
     def test_tpu_host_output_buffer_is_forwarded_to_full_allocator_only(self):
         stub = _make_self(page_size=8, full_available=16, swa_available=16)
+        stub.full_attn_allocator.alloc_extend.side_effect = (
+            lambda *_, out_indices_cpu=None, **__: (
+                out_indices_cpu.copy_(torch.tensor([10, 11], dtype=torch.int32))
+                if out_indices_cpu is not None
+                else None,
+                torch.tensor([10, 11], dtype=torch.int32, device="meta"),
+            )[1]
+        )
+        stub.swa_attn_allocator.alloc_extend.side_effect = (
+            lambda *_, out_indices_cpu=None, **__: (
+                out_indices_cpu.copy_(torch.tensor([20, 21], dtype=torch.int32))
+                if out_indices_cpu is not None
+                else None,
+                torch.tensor([20, 21], dtype=torch.int32, device="meta"),
+            )[1]
+        )
         prefix = torch.tensor([7, 7], dtype=torch.int64)
         seq = torch.tensor([8, 8], dtype=torch.int64)
         out_indices_cpu = torch.empty(2, dtype=torch.int32)
@@ -87,14 +105,16 @@ class TestSWAAllocExtendPageEstimation(CustomTestCase):
             )
 
         self.assertIsNotNone(result)
+        self.assertEqual(result.device.type, "meta")
         self.assertIs(
             stub.full_attn_allocator.alloc_extend.call_args.kwargs["out_indices_cpu"],
             out_indices_cpu,
         )
-        self.assertNotIn(
-            "out_indices_cpu",
-            stub.swa_attn_allocator.alloc_extend.call_args.kwargs,
-        )
+        swa_out_cpu = stub.swa_attn_allocator.alloc_extend.call_args.kwargs[
+            "out_indices_cpu"
+        ]
+        self.assertIsNot(swa_out_cpu, out_indices_cpu)
+        self.assertEqual(stub.full_to_swa_index_mapping[[10, 11]].tolist(), [20, 21])
 
     def test_zero_new_pages_must_succeed(self):
         # Old: 2 + 2*8 = 18 > 16 -> would refuse.

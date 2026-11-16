@@ -339,12 +339,16 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         swa_last_loc = self.translate_loc_from_full_to_swa(last_loc)
 
         full_alloc_kwargs = {"num_new_pages": num_new_pages, **host_kwargs}
+        swa_alloc_kwargs = {"num_new_pages": num_new_pages, **host_kwargs}
+        swa_indices_cpu = None
         if out_indices_cpu is not None:
             # TPU speculative decoding preallocates this host output buffer.
-            # Only the full-attention locations are returned to the caller;
-            # the SWA allocator needs its own independently populated indices.
+            # Give SWA its own host copy so set_full_to_swa_mapping updates
+            # CPU-resident mappings without reading either tensor from device.
             assert _is_tpu
             full_alloc_kwargs["out_indices_cpu"] = out_indices_cpu
+            swa_indices_cpu = torch.empty_like(out_indices_cpu)
+            swa_alloc_kwargs["out_indices_cpu"] = swa_indices_cpu
 
         alloc_full_indices = self.full_attn_allocator.alloc_extend(
             prefix_lens,
@@ -362,13 +366,15 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             seq_lens_cpu,
             swa_last_loc,
             extend_num_tokens,
-            num_new_pages=num_new_pages,
-            **host_kwargs,
+            **swa_alloc_kwargs,
         )
         assert alloc_full_indices is not None
         assert alloc_swa_indices is not None
 
-        self.set_full_to_swa_mapping(alloc_full_indices, alloc_swa_indices)
+        if out_indices_cpu is not None:
+            self.set_full_to_swa_mapping(out_indices_cpu, swa_indices_cpu)
+        else:
+            self.set_full_to_swa_mapping(alloc_full_indices, alloc_swa_indices)
 
         return alloc_full_indices
 
