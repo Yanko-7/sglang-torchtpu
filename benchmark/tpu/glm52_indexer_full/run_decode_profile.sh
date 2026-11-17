@@ -15,6 +15,10 @@ mkdir -p "$OUT" "$ARTIFACT_LOCAL_DIR/profiling" "$ARTIFACT_LOCAL_DIR/rank-0/comp
 "$PY" -m pip freeze > "$ARTIFACT_LOCAL_DIR/profiling/python-packages.txt"
 env | sort > "$ARTIFACT_LOCAL_DIR/profiling/env.txt"
 
+# The serving runtime does not ship pytest; the gating unit test needs it.
+"$PY" -m pip install -q pytest 2>&1 | tee "$OUT/pip-pytest.log"
+"$PY" -m pytest --version
+
 ARMS="torch_baseline_full dsv41_upstream_fp8_full dsv41_single_block_fp8_full"
 KERNEL=sglang_tpu/kernels/deepseek_v41/index_selection/fp8/dense_logits.py
 cp "$KERNEL" "$OUT/dense_logits.orig.py"
