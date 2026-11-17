@@ -32,8 +32,12 @@ _ISSUE_DEPTH = 8
 
 
 def _encode_page_table(page_ids, layout, first_bank_rows):
-    """Records hold the bank-local row << 2, a valid bit and the bank bit."""
-    valid = (page_ids >= 0) & (page_ids < layout.pages)
+    """Records hold the bank-local row << 2, a valid bit and the bank bit.
+
+    Page 0 is the null page, as SGLang's allocator never hands it out; it and
+    negative IDs are empty.
+    """
+    valid = (page_ids > 0) & (page_ids < layout.pages)
     # Spread masked reads: repeating page zero serializes a partially filled tile.
     safe = jnp.where(valid, page_ids, jnp.arange(page_ids.shape[-1]) % layout.pages)
     global_rows = layout.page_offset + safe * layout.page_stride

@@ -281,15 +281,22 @@ def _low_ratio_metadata(
 
     seq_lens_casual = positions + 1
     out_loc, _ = _low_ratio_compression_metadata(ratio, seq_lens_casual, out_cache_loc)
+    index_pages = expand_index_page_table(
+        full_pages.to(torch.int32),
+        full_page_size=FULL_PAGE_TOKENS,
+        compress_ratio=ratio,
+        index_page_size=PAGE_RECORDS,
+    ).to(torch.int32)
+    # The null full page 0 expands to indexer pages 0, 1, ...; keep all of them
+    # on the null page 0, which the indexer kernel treats as empty.
+    blocks_per_page = index_pages.shape[1] // max(1, full_pages.shape[1])
+    if blocks_per_page > 1:
+        empty = (full_pages == 0).repeat_interleave(blocks_per_page, dim=1)
+        index_pages = index_pages.masked_fill(empty, 0)
     return LowRatioMetadata(
         out_loc=out_loc.masked_fill(~valid, -1).to(torch.int32),
         lengths=torch.where(valid, seq_lens_casual // ratio, 0).to(torch.int32),
-        index_pages=expand_index_page_table(
-            full_pages.to(torch.int32),
-            full_page_size=FULL_PAGE_TOKENS,
-            compress_ratio=ratio,
-            index_page_size=PAGE_RECORDS,
-        ).to(torch.int32),
+        index_pages=index_pages,
     )
 
 
