@@ -649,9 +649,10 @@ def _select_fp8_indexer_jax(
         constant_values=-1,
     )
 
+    # A batch whose scores fit the budget is one block: one dense call and one
+    # top-k call, whatever its row count's divisors.
     rows = prefill_chunk_rows or min(
-        max(tokens, query_tile),
-        max(query_tile, _INDEX_UNTILED_SCORE_ELEMENTS // capacity),
+        tokens, max(query_tile, _INDEX_UNTILED_SCORE_ELEMENTS // capacity)
     )
     padded = (tokens + rows - 1) // rows * rows
     # Callers group each request's queries contiguously in ascending request
@@ -699,7 +700,7 @@ def _select_fp8_indexer_jax(
         # Attention re-sorts the records; skip ID tie-breaks and output sorting.
         unordered=unordered,
     )
-    chunk_rows = prefill_chunk_rows or indexer_query_rows(tokens, query_tile)
+    chunk_rows = rows
     # Decode top-k scans only the blocks that can hold a winner. Publishing
     # layers rank the same SparseCore block maxima for their candidates.
     select_block = block_size if publish_rows else _BLOCK_TOPK_BLOCK

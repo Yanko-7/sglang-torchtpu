@@ -649,7 +649,10 @@ class TestSplitDsaAndStateOffload(CustomTestCase):
         self.assertEqual(
             host.get_size_per_token(),
             TpuSplitMLATokenToKVPool.bytes_per_token(
-                index_head_dim=128, index_key_layers=[True, False, True], index_kpool=4
+                page_size=split.page_size,
+                index_head_dim=128,
+                index_key_layers=[True, False, True],
+                index_kpool=4,
             ),
         )
 
