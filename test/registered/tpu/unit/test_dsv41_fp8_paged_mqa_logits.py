@@ -70,9 +70,11 @@ def test_paged_mqa_logits_matches_reference(page_size, max_model_len):
     lengths = np.concatenate([b + np.arange(c) for b, c in zip(bases, counts)])
     owners = np.repeat(np.arange(len(counts)), counts)
     per_request = -(-max_model_len // page_size)
-    layout = PackedFP8Layout(len(counts) * per_request, page_size=page_size)
-    table = rng.permutation(layout.pages).reshape(len(counts), per_request)
+    # Page 0 is the null page: real pages start at 1.
+    layout = PackedFP8Layout(len(counts) * per_request + 1, page_size=page_size)
+    table = 1 + rng.permutation(layout.pages - 1).reshape(len(counts), per_request)
     table[2, 1] = -1
+    table[0, 2] = 0
     keys = jnp.asarray(rng.normal(size=(layout.pages * page_size, 128)), jnp.bfloat16)
     pool, dequantized = _pack(keys, layout)
     split = int(layout.pages * 0.6) * layout.page_stride
@@ -110,7 +112,7 @@ def test_paged_mqa_logits_matches_reference(page_size, max_model_len):
         expected = np.asarray(
             (jnp.maximum(logits, 0) * weights[rows][..., None]).sum(1)
         )
-        visible = (position[None] < lengths[rows][:, None]) & (pages >= 0)[None]
+        visible = (position[None] < lengths[rows][:, None]) & (pages > 0)[None]
         actual = scores[rows]
         np.testing.assert_array_equal(np.isneginf(actual), ~visible)
         np.testing.assert_allclose(
@@ -131,7 +133,7 @@ def test_unsorted_requests_select_own_pages():
     keys = jnp.asarray(rng.normal(size=(layout.pages * page_size, 128)), jnp.bfloat16)
     pool, _ = _pack(keys, layout)
     pool = jnp.asarray(pool)
-    table = rng.integers(0, layout.pages, (groups, width // page_size)).astype(np.int32)
+    table = rng.integers(1, layout.pages, (groups, width // page_size)).astype(np.int32)
     q = jnp.asarray(rng.normal(size=(tokens, 32, 128)), jnp.float8_e4m3fn)
     weights = jnp.asarray(rng.uniform(0.01, 0.1, (tokens, 32)), jnp.float32)
     layout_args = (layout.pages, layout.page_stride, layout.page_offset, page_size)
