@@ -108,7 +108,9 @@ def dsv41_inputs(step, rows):
     blocks = [-(-int(n) // DSV41_PAGE) for n in step.kv_lens]
     num_pages = 1 + sum(blocks) + 3
     pool = 1 + np.random.default_rng(1).permutation(num_pages - 1)
-    pages = np.zeros((len(blocks), width // DSV41_PAGE), np.int32)
+    # Unused entries are -1, as the kernel's own padding: page 0 would be read as
+    # a valid page, serializing every masked DMA on one address.
+    pages = np.full((len(blocks), width // DSV41_PAGE), -1, np.int32)
     bank = np.zeros((num_pages, DSV41_PAGE_ROWS, DSV41_PAGE), np.uint32)
     used = 0
     for seq, count in enumerate(blocks):
@@ -294,7 +296,7 @@ def run_case(context, queries, sequences, *, validation_only=False, padded=0, ra
                       error=repr(error)[-4000:]))
             continue
         emit(dict(kind="compile", case=case, variant=name, compile_first_s=time.perf_counter()-start))
-        if args.mode == "bench":
+        if args.mode == "bench" or args.decode_profile:
             try:
                 check_slots(output, step, q8, weights, decoded, case, name)
             except AssertionError as error:
