@@ -1,0 +1,125 @@
+{
+  "repo": "https://github.com/vllm-project/vllm-torchtpu",
+  "branch": "epic/dsv41",
+  "commit": "11edf50e25ad4a692f15490fc6cf114d9a510cc8",
+  "license": "Apache-2.0",
+  "adaptations": "none; files are byte-identical. run.py registers vllm_torchtpu, vllm_torchtpu.models.vllm and vllm_torchtpu.kernels.deepseek_v4.streamindex_topk as empty namespace packages so their __init__ (vLLM runtime) never executes.",
+  "files": {
+    "vllm_torchtpu/__init__.py": {
+      "source": "src/vllm_torchtpu/__init__.py",
+      "git_blob": "f0e9dc0f41483ee089023fb003dde0618872030c"
+    },
+    "vllm_torchtpu/envs.py": {
+      "source": "src/vllm_torchtpu/envs.py",
+      "git_blob": "1a95e82189cafbca2007d3083c2aead277b3ff8f"
+    },
+    "vllm_torchtpu/kernels/__init__.py": {
+      "source": "src/vllm_torchtpu/kernels/__init__.py",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    "vllm_torchtpu/kernels/deepseek_v4/__init__.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v4/__init__.py",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    "vllm_torchtpu/kernels/deepseek_v4/sparsecore_topk.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v4/sparsecore_topk.py",
+      "git_blob": "1ec004617fa702995be76dfa2715a7a582ec052d"
+    },
+    "vllm_torchtpu/kernels/deepseek_v4/streamindex_topk/__init__.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v4/streamindex_topk/__init__.py",
+      "git_blob": "40d3de4c84050104804cc668fa3cd5544b972b84"
+    },
+    "vllm_torchtpu/kernels/deepseek_v4/streamindex_topk/config.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v4/streamindex_topk/config.py",
+      "git_blob": "63392bd1e031ca552b194c13d180ebdd52b70100"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/__init__.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/__init__.py",
+      "git_blob": "5901ca7c3b6db1c1bb37b2ed570dad732fe2daf3"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/index_selection/__init__.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/index_selection/__init__.py",
+      "git_blob": "208f01a7cb5ee04c88d276fec2082cd4e830884b"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/index_selection/block_topk.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/index_selection/block_topk.py",
+      "git_blob": "9cfea269da2787a0386c026d5179c0042727f9af"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/__init__.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/__init__.py",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/cache.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/cache.py",
+      "git_blob": "24c54c1dc6f2f298206b9fcf75517abe2f7561a0"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/candidates.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/candidates.py",
+      "git_blob": "966823ee6afcb780ff0bc5c88927d80d6bc49dac"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/common.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/common.py",
+      "git_blob": "79bb0341ea90d5be4b3f357f5b605b7c84deabb2"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/dense_logits.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/dense_logits.py",
+      "git_blob": "28a0897188b61552683577822767e9d71a69023f"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/prepare.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/prepare.py",
+      "git_blob": "eb5b3b28921869577f0d86f4f60997db475338a2"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/sparse_logits.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/sparse_logits.py",
+      "git_blob": "5354b77d14d3e5ce1665d40805f8319adb2466b6"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/tuned.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/tuned.py",
+      "git_blob": "17e9f78178bb8ae9ba1108d3d67869228dea04fe"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/index_selection/publication.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/index_selection/publication.py",
+      "git_blob": "dd3efbab758e917c5e1af4a0d22e0787b615733a"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/index_selection/streaming_topk.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/index_selection/streaming_topk.py",
+      "git_blob": "ab560e2a45e9e84e435f6db78a2fd048835e8e26"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/index_selection/tuned_block_sizes.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/index_selection/tuned_block_sizes.py",
+      "git_blob": "7d57d6333acfdda2e5d51c88ecc8342a7cfe35c6"
+    },
+    "vllm_torchtpu/kernels/deepseek_v41/indexer.py": {
+      "source": "src/vllm_torchtpu/kernels/deepseek_v41/indexer.py",
+      "git_blob": "e8a39051af213732731ca701c6e833c202d3a76d"
+    },
+    "vllm_torchtpu/models/__init__.py": {
+      "source": "src/vllm_torchtpu/models/__init__.py",
+      "git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    "vllm_torchtpu/models/vllm/__init__.py": {
+      "source": "src/vllm_torchtpu/models/vllm/__init__.py",
+      "git_blob": "9a6b73734153c49f32c226a482be76aaacd8b33c"
+    },
+    "vllm_torchtpu/models/vllm/deepseek_v41/__init__.py": {
+      "source": "src/vllm_torchtpu/models/vllm/deepseek_v41/__init__.py",
+      "git_blob": "59523cf0aac44333d1c148681785a31ebc6d6b94"
+    },
+    "vllm_torchtpu/models/vllm/deepseek_v41/v2/__init__.py": {
+      "source": "src/vllm_torchtpu/models/vllm/deepseek_v41/v2/__init__.py",
+      "git_blob": "37105e40590ee173480d20b8fe961328da6d5301"
+    },
+    "vllm_torchtpu/models/vllm/deepseek_v41/v2/indexer_fp8.py": {
+      "source": "src/vllm_torchtpu/models/vllm/deepseek_v41/v2/indexer_fp8.py",
+      "git_blob": "d70b28ef2aa5c4c1ea7f87b7aea5978177249ad1"
+    },
+    "vllm_torchtpu/models/vllm/deepseek_v41/v2/indexer_select.py": {
+      "source": "src/vllm_torchtpu/models/vllm/deepseek_v41/v2/indexer_select.py",
+      "git_blob": "e0bfc701832a1f7f9669434736655473c1ccc46a"
+    },
+    "vllm_torchtpu/models/vllm/vllm_model_wrapper_context.py": {
+      "source": "src/vllm_torchtpu/models/vllm/vllm_model_wrapper_context.py",
+      "git_blob": "aabddb9165ea6250a4337d865b99055b23dc5552"
+    }
+  }
+}

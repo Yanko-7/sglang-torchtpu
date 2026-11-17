@@ -15,6 +15,7 @@ from pathlib import Path
 import statistics
 import sys
 import time
+import types
 
 ROOT = Path(__file__).resolve().parents[3]
 parser = argparse.ArgumentParser()
@@ -41,6 +42,22 @@ from sglang_tpu.dsv4.streamindex_topk.streamindex_topk import streamindex_topk
 from glm52_fp8.kernels.dsa.indexer import compute_scores_and_select_topk_indices as fp8_full
 from glm52_jax.kernels.dsa.indexer import compute_scores_and_select_topk_indices as native_full
 
+# vllm-torchtpu epic/dsv41 packed FP8 indexer: byte-identical upstream files
+# (dsv41_upstream/SOURCE.json). Three package __init__ files would import vLLM
+# and the vllm-torchtpu runtime (env overrides, LIBTPU_INIT_ARGS), so those
+# packages are registered as empty namespaces and only kernel modules execute.
+DSV41 = "dsv41_upstream_fp8_full"
+DSV41_ROOT = Path(__file__).resolve().parent / "dsv41_upstream"
+sys.path.insert(0, str(DSV41_ROOT))
+for package in ("vllm_torchtpu", "vllm_torchtpu.models.vllm",
+                "vllm_torchtpu.kernels.deepseek_v4.streamindex_topk"):
+    namespace = types.ModuleType(package)
+    namespace.__path__ = [str(DSV41_ROOT / package.replace(".", "/"))]
+    sys.modules[package] = namespace
+from vllm_torchtpu.kernels.deepseek_v41.index_selection.fp8.cache import (
+    PAGE_RECORDS as DSV41_PAGE, PAGE_ROWS as DSV41_PAGE_ROWS, PackedFP8Layout, read_fp8_records)
+from vllm_torchtpu.models.vllm.deepseek_v41.v2.indexer_fp8 import select_fp8_indexer_jax as dsv41_select
+
 device = jax.devices()[0]
 runtime = dict(
     executable=sys.executable,
@@ -55,6 +72,9 @@ runtime = dict(
     flags={n: os.environ.get(n) for n in ("JAX_PLATFORMS", "XLA_FLAGS", "LIBTPU_INIT_ARGS", "TPU_LIBRARY_PATH")},
     mapped_libtpu=sorted(set(line.split()[-1] for line in Path("/proc/self/maps").read_text().splitlines() if "libtpu.so" in line)),
 )
+runtime["dsv41"] = dict(source=json.loads((DSV41_ROOT / "SOURCE.json").read_text()),
+                        module=sys.modules[dsv41_select.__module__].__file__,
+                        issue_depth_env=os.environ.get("TPU_DEEPSEEK_V41_INDEXER_ISSUE_DEPTH"))
 assert runtime["versions"]["jax"] == runtime["versions"]["jaxlib"] == "0.11.2"
 assert runtime["versions"]["libtpu"] == "0.0.50"
 (args.out / "runtime.json").write_text(json.dumps(runtime, indent=2))
@@ -71,6 +91,57 @@ def emit(record):
     with (args.out / "metrics.jsonl").open("a") as out:
         out.write(json.dumps(record) + "\n")
     print(json.dumps(record), flush=True)
+
+
+def dsv41_inputs(step, rows):
+    """The same FP8 key bytes and scales in vllm-torchtpu's 128-record packed pages.
+
+    Logical 128-token blocks get shuffled pages (page 0 unused, as in the fixture).
+    The selector returns sequence-local positions; the GLM page table maps them.
+    """
+    glm = step.expected_cache.reshape(-1, 256)
+    table = step.page_indices.reshape(len(step.kv_lens), -1)
+    width = table.shape[1] * 64
+    blocks = [-(-int(n) // DSV41_PAGE) for n in step.kv_lens]
+    num_pages = 1 + sum(blocks) + 3
+    pool = 1 + np.random.default_rng(1).permutation(num_pages - 1)
+    pages = np.zeros((len(blocks), width // DSV41_PAGE), np.int32)
+    bank = np.zeros((num_pages, DSV41_PAGE_ROWS, DSV41_PAGE), np.uint32)
+    used = 0
+    for seq, count in enumerate(blocks):
+        pages[seq, :count] = pool[used:used + count]
+        used += count
+        positions = np.arange(count * DSV41_PAGE)
+        live = positions < step.kv_lens[seq]
+        slots = table[seq, positions // 64] * 64 + positions % 64
+        records = np.where(live[:, None], glm[slots], 0).reshape(count, DSV41_PAGE, 256)
+        # Word f of token t holds features 4f..4f+3, byte d % 4; field 32 is the FP32 scale.
+        words = np.ascontiguousarray(records[..., :128]).view("<u4")
+        bank[pages[seq, :count], :32] = words.transpose(0, 2, 1)
+        bank[pages[seq, :count], 32] = records[..., 128].astype(np.uint32) << 23
+    requests = np.full(rows, -1, np.int32)
+    lengths = np.zeros(rows, np.int32)
+    for seq in range(len(step.kv_lens)):
+        start, end = map(int, step.cu_q_lens[seq:seq+2])
+        requests[start:end] = seq
+        lengths[start:end] = step.kv_lens[seq] - (end - start) + np.arange(1, end - start + 1)
+    layout = PackedFP8Layout(num_pages, DSV41_PAGE_ROWS, 0, DSV41_PAGE)
+    return bank.view(np.int32).reshape(-1, DSV41_PAGE), pages, requests, lengths, layout
+
+
+def check_dsv41_cache(bank, pages, step, decoded, layout):
+    """Upstream's reader must decode the repacked cache to the GLM keys exactly."""
+    table = step.page_indices.reshape(len(step.kv_lens), -1)
+    records, slots = [], []
+    for seq, kv_len in enumerate(step.kv_lens):
+        positions = np.unique(np.linspace(0, int(kv_len) - 1, 1024, dtype=np.int64))
+        records.append(pages[seq, positions // DSV41_PAGE] * DSV41_PAGE + positions % DSV41_PAGE)
+        slots.append(table[seq, positions // 64] * 64 + positions % 64)
+    records, slots = np.concatenate(records).astype(np.int32), np.concatenate(slots)
+    got = np.asarray(read_fp8_records((bank,), jnp.asarray(records), layout)).astype(np.float32)
+    want = decoded.reshape(-1, 128)[slots].astype(np.float32)
+    assert np.array_equal(got, want), ("dsv41 cache repack", int((got != want).any(-1).sum()))
+    return records.size
 
 
 def make_case(context, queries, sequences, *, padded=0, ragged=False):
@@ -92,9 +163,13 @@ def make_case(context, queries, sequences, *, padded=0, ragged=False):
     values = (q8, weights, step.expected_cache, packed, decoded,
               step.kv_lens, step.page_indices, step.cu_q_lens, cu_kv, step.distribution)
     values = tuple(jax.device_put(x, device) for x in values)
+    d_bank, d_pages, d_requests, d_lengths, d_layout = dsv41_inputs(step, rows)
+    d_values = tuple(jax.device_put(x, device) for x in (d_bank, d_pages, d_requests, d_lengths))
+    glm_pages = step.expected_cache.shape[0]
     metadata_case = dict(context=context, queries_per_sequence=queries, sequences=len(lens), rows=rows,
                          page_size=64, capacity=92160, k=2048, heads=32, head_dim=128,
                          packed_cache_bytes=packed.nbytes, native_cache_bytes=decoded.nbytes,
+                         dsv41_cache_bytes=d_bank.nbytes, dsv41_page_size=DSV41_PAGE,
                          input_sha256=hashlib.sha256(query.tobytes()+gates.tobytes()+packed.tobytes()+step.page_indices.tobytes()).hexdigest(),
                          boundary="resident prepared query + resident updated cache -> physical slots; includes TC score, SC selection, mapping; excludes query quantization/cache writer")
 
@@ -124,11 +199,35 @@ def make_case(context, queries, sequences, *, padded=0, ragged=False):
             )
         return call
 
+    def dsv41_path():
+        # An unfiltered DSV4.1 layer: no candidate publication or sparse logits,
+        # unordered selection as its attention consumes it. Mapping as torch_*.
+        layout_args = (d_layout.pages, d_layout.page_stride, d_layout.page_offset, d_layout.page_size)
+        def call(q, w, bank, d_table, requests, d_lens, cu_q, pages):
+            ids, _ = dsv41_select(
+                q, (bank,), d_table, w, d_lens, jnp.full((q.shape[0], 1), -1, jnp.int32),
+                requests, d_lens.max().reshape(1), cu_q, layout_args,
+                2048, 8, False, False, True, d_table.shape[1] * DSV41_PAGE,
+            )
+            _, slots = prepare_gather_indices(ids, pages, cu_q, page_size=64, total_num_pages=glm_pages)
+            return jnp.where(ids >= 0, slots, -1)
+        return call
+
     functions = {"torch_baseline_full": torch_path("sparsecore"),
                  "torch_selector_only_full": torch_path("radix_v2"),
                  "jax_fp8_pipeline_full": jax_path(True),
                  "jax_native_bf16_reference": jax_path(False)}
-    return step, q8, weights, decoded, values, functions, metadata_case
+    inputs = {name: values for name in functions}
+    try:
+        checked = check_dsv41_cache(d_values[0], d_pages, step, decoded, d_layout)
+        emit(dict(kind="dsv41_cache_check", context=context, queries_per_sequence=queries,
+                  sequences=len(lens), records_checked=checked, exact=True))
+        functions[DSV41] = dsv41_path()
+        inputs[DSV41] = (values[0], values[1], *d_values, values[7], values[6])
+    except Exception as error:
+        emit(dict(kind="error", variant=DSV41, stage="cache_repack", context=context,
+                  queries_per_sequence=queries, sequences=len(lens), error=repr(error)[-4000:]))
+    return step, q8, weights, decoded, inputs, functions, metadata_case
 
 
 def check_slots(slots, step, q8, weights, decoded, case, variant):
@@ -163,7 +262,7 @@ def check_slots(slots, step, q8, weights, decoded, case, variant):
                 minimum_ratio = min(minimum_ratio, ratio)
                 checked.append(row)
     assert np.all(slots[active:] == -1), (case, variant, "padding")
-    emit(dict(kind="correctness", case=case, variant=variant, all_rows_mapping_causal_unique=True,
+    emit(dict(kind="correctness", case=case, variant=variant, passed=True, all_rows_mapping_causal_unique=True,
               numpy_score_sample_rows=checked, minimum_selected_cutoff_ratio=minimum_ratio))
 
 
@@ -174,16 +273,31 @@ def run_case(context, queries, sequences, *, validation_only=False, padded=0, ra
     compiled = {}
     for name, fn in functions.items():
         start = time.perf_counter()
-        lower = jax.jit(fn).lower(*values)
-        (args.out / f"{case}-{name}.stablehlo.txt").write_text(lower.as_text())
-        compiled[name] = lower.compile()
-        output = compiled[name](*values)
-        jax.block_until_ready(output)
+        # The upstream DSV4.1 arm runs off its tuned shapes (K2048, uncompressed
+        # 92160 width); its failure is recorded without stopping the other arms.
+        try:
+            lower = jax.jit(fn).lower(*values[name])
+            (args.out / f"{case}-{name}.stablehlo.txt").write_text(lower.as_text())
+            compiled[name] = lower.compile()
+            output = compiled[name](*values[name])
+            jax.block_until_ready(output)
+        except Exception as error:
+            if name != DSV41:
+                raise
+            compiled.pop(name, None)
+            emit(dict(kind="error", case=case, variant=name, stage="compile_or_first_call",
+                      error=repr(error)[-4000:]))
+            continue
         emit(dict(kind="compile", case=case, variant=name, compile_first_s=time.perf_counter()-start))
         if args.mode == "bench":
-            check_slots(output, step, q8, weights, decoded, case, name)
+            try:
+                check_slots(output, step, q8, weights, decoded, case, name)
+            except AssertionError as error:
+                if name != DSV41:
+                    raise
+                emit(dict(kind="correctness", case=case, variant=name, passed=False, error=repr(error)[:2000]))
         for _ in range(5):
-            jax.block_until_ready(compiled[name](*values))
+            jax.block_until_ready(compiled[name](*values[name]))
     if not validation_only:
         if args.mode == "bench":
             samples = {name: [] for name in compiled}
@@ -191,7 +305,7 @@ def run_case(context, queries, sequences, *, validation_only=False, padded=0, ra
             for iteration in range(30):
                 for name in names if iteration % 2 == 0 else names[::-1]:
                     start = time.perf_counter_ns()
-                    jax.block_until_ready(compiled[name](*values))
+                    jax.block_until_ready(compiled[name](*values[name]))
                     samples[name].append((time.perf_counter_ns()-start)/1000)
             for name, values_us in samples.items():
                 emit(dict(kind="bench", case=case, variant=name, latency_ms=statistics.median(values_us)/1000,
@@ -210,7 +324,7 @@ def run_case(context, queries, sequences, *, validation_only=False, padded=0, ra
                 with jax.profiler.trace(str(dest), profiler_options=options):
                     for i in range(5):
                         with jax.profiler.StepTraceAnnotation(case+"_"+name, step_num=i):
-                            jax.block_until_ready(fn(*values))
+                            jax.block_until_ready(fn(*values[name]))
                 assert list(dest.glob("plugins/profile/**/*.xplane.pb")), (case, name, "missing trace")
                 emit(dict(kind="capture", case=case, variant=name))
     del compiled, values, functions
