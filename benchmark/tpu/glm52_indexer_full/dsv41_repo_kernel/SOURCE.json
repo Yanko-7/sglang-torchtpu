@@ -1,0 +1,7 @@
+{
+  "repo": "https://github.com/Yanko-7/sglang-torchtpu",
+  "file": "sglang_tpu/kernels/deepseek_v41/index_selection/fp8/dense_logits.py",
+  "a": {"branch": "yanko/dsv41-indexer-skip-empty-pages", "commit": "7d97c71cad2e083efc842fe4866a2996bd1e0d99"},
+  "b": {"branch": "yanko/dsv41-indexer-skip-empty-pages-b", "commit": "c99748c5860aaa4fca11914c5b87200d6da5c466"},
+  "test": "test/registered/tpu/unit/test_dsv41_fp8_paged_mqa_logits.py at commit a (unchanged in b)"
+}

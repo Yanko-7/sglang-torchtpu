@@ -66,14 +66,34 @@ from vllm_torchtpu.models.vllm.deepseek_v41.v2.indexer_fp8 import select_fp8_ind
 # instead of gcd(tokens, 96) blocks. Larger batches keep upstream's behaviour.
 # The vendored upstream files stay unmodified.
 DSV41_SINGLE = "dsv41_single_block_fp8_full"
-# Loaded as a sibling of the upstream module so its relative imports resolve.
-single_spec = importlib.util.spec_from_file_location(
-    "vllm_torchtpu.models.vllm.deepseek_v41.v2.indexer_fp8_single_block",
-    Path(__file__).resolve().parent / "dsv41_single_block" / "indexer_fp8.py")
-dsv41_single = importlib.util.module_from_spec(single_spec)
-sys.modules[single_spec.name] = dsv41_single
-single_spec.loader.exec_module(dsv41_single)
-DSV41_ARMS = (DSV41, DSV41_SINGLE)
+BENCH = Path(__file__).resolve().parent
+
+
+def load_sibling(name, path):
+    """Load `path` as module `name` inside the vendored package, so relative imports resolve."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+SELECTOR = "vllm_torchtpu.models.vllm.deepseek_v41.v2.indexer_fp8"
+dsv41_single = load_sibling(f"{SELECTOR}_single_block", BENCH / "dsv41_single_block" / "indexer_fp8.py")
+
+# The repo port's dense kernel (dsv41_repo_kernel/SOURCE.json) under the same
+# single-block selector, so only the kernel differs from DSV41_SINGLE. Both skip
+# K pages past each tile's longest row and treat page 0 as the null page; A
+# tracks issued pages per K slot, B derives them from the tile's rows.
+DENSE = "vllm_torchtpu.kernels.deepseek_v41.index_selection.fp8.dense_logits"
+DSV41_SKIP = {}
+for variant in ("a", "b"):
+    dense = load_sibling(f"{DENSE}_skip_{variant}", BENCH / "dsv41_repo_kernel" / variant / "dense_logits.py")
+    selector = load_sibling(f"{SELECTOR}_skip_{variant}", BENCH / "dsv41_single_block" / "indexer_fp8.py")
+    # The selector resolves its scorer from module globals at trace time.
+    selector.fp8_paged_mqa_logits = dense.fp8_paged_mqa_logits
+    DSV41_SKIP[f"dsv41_skip_pages_{variant}_fp8_full"] = selector
+DSV41_ARMS = (DSV41, DSV41_SINGLE, *DSV41_SKIP)
 
 device = jax.devices()[0]
 runtime = dict(
@@ -218,11 +238,13 @@ def make_case(context, queries, sequences, *, padded=0, ragged=False):
             )
         return call
 
-    def dsv41_path(select=dsv41_select):
+    def dsv41_path(select=dsv41_select, null_page=-1):
         # An unfiltered DSV4.1 layer: no candidate publication or sparse logits,
         # unordered selection as its attention consumes it. Mapping as torch_*.
+        # null_page=0 fills unused entries as SGLang's page tables do.
         layout_args = (d_layout.pages, d_layout.page_stride, d_layout.page_offset, d_layout.page_size)
         def call(q, w, bank, d_table, requests, d_lens, cu_q, pages):
+            d_table = jnp.where(d_table < 0, null_page, d_table)
             ids, _ = select(
                 q, (bank,), d_table, w, d_lens, jnp.full((q.shape[0], 1), -1, jnp.int32),
                 requests, d_lens.max().reshape(1), cu_q, layout_args,
@@ -243,6 +265,8 @@ def make_case(context, queries, sequences, *, padded=0, ragged=False):
                   sequences=len(lens), records_checked=checked, exact=True))
         functions[DSV41] = dsv41_path()
         functions[DSV41_SINGLE] = dsv41_path(dsv41_single.select_fp8_indexer_jax)
+        for name, module in DSV41_SKIP.items():
+            functions[name] = dsv41_path(module.select_fp8_indexer_jax, null_page=0)
         for name in DSV41_ARMS:
             inputs[name] = (values[0], values[1], *d_values, values[7], values[6])
     except Exception as error:
