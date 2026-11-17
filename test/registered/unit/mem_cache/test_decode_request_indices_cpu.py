@@ -13,7 +13,7 @@ maybe_stub_sgl_kernel()
 
 from sglang.srt.managers import schedule_batch  # noqa: E402
 from sglang.srt.mem_cache import allocation  # noqa: E402
-from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode  # noqa: E402
+from sglang.srt.model_executor.forward_mode import CaptureHiddenMode
 
 register_cpu_ci(est_time=5, suite="base-a-test-cpu")
 

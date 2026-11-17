@@ -16,12 +16,9 @@ from sglang.srt.environ import envs
 from sglang.srt.layers import dp_attention
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.aux_hidden_states import AuxHiddenStateList
-from sglang.srt.model_executor.forward_batch_info import (
-    ForwardBatch,
-    ForwardMode,
-    PPProxyTensors,
-)
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+from sglang.srt.model_executor.forward_mode import ForwardMode
 from sglang.srt.runtime_context import get_context
 from sglang.srt.speculative.eagle_info import (
     EagleDraftExtendInput,

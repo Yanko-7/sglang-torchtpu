@@ -317,10 +317,8 @@ class TestGDNPrefixCache(CustomTestCase):
             self.assertEqual(torch.count_nonzero(actual[0].cpu()).item(), 0)
 
     def test_bucketed_metadata(self):
-        from sglang.srt.model_executor.forward_batch_info import (
-            ForwardBatch,
-            ForwardMode,
-        )
+        from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+        from sglang.srt.model_executor.forward_mode import ForwardMode
         from sglang_tpu.attention_gdn_pallas import (
             TpuGDNAttnBackend,
         )

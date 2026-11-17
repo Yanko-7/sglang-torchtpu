@@ -11,12 +11,9 @@ from torch_tpu._internal import execution_mode
 
 from sglang.srt.environ import envs
 from sglang.srt.managers import mm_schedule, mm_utils
-from sglang.srt.managers.schedule_batch import (
-    Modality,
-    MultimodalDataItem,
-    MultimodalInputs,
-)
+from sglang.srt.managers.req_types import MultimodalDataItem, MultimodalInputs
 from sglang.srt.mem_cache.multimodal_cache import MultiModalStaticCache
+from sglang.srt.multimodal.modality import Modality
 from sglang.test.ci.ci_register import register_tpu_ci
 from sglang_tpu import mm_embed_tpu
 from sglang_tpu.graph_runner.vit_tpu_compile_runner import (

@@ -680,7 +680,7 @@ def test_device_accept_rejects_invalid_future_window(candidate_shape, accept_sha
 
 @pytest.mark.parametrize("is_tpu", (False, True))
 def test_device_accept_cache_window_follows_verify_input(is_tpu):
-    from sglang.srt.model_executor.forward_batch_info import ForwardMode
+    from sglang.srt.model_executor.forward_mode import ForwardMode
     from sglang.srt.speculative import eagle_worker_common
     from sglang.srt.speculative.eagle_info import EagleDraftInput
 
@@ -852,7 +852,7 @@ def test_draft_extend_positions_follow_device_seq_lens():
 def test_prepare_for_draft_extend_tpu_ignores_stale_host_seq_lens():
     """Device accept routing leaves seq_lens_cpu one acceptance behind; the
     draft-extend positions must come from the device seq_lens."""
-    from sglang.srt.model_executor.forward_batch_info import ForwardMode
+    from sglang.srt.model_executor.forward_mode import ForwardMode
     from sglang.srt.speculative import eagle_worker_common
 
     seq_lens = torch.tensor([7, 12])

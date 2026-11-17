@@ -38,12 +38,11 @@ from sglang.srt.mem_cache.memory_pool import (
     MHATokenToKVPool,
 )
 from sglang.srt.model_executor.forward_batch_info import (
-    CaptureHiddenMode,
-    ForwardMode,
     LogitsOutputMode,
     PPProxyTensors,
 )
 from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+from sglang.srt.model_executor.forward_mode import CaptureHiddenMode, ForwardMode
 from sglang.srt.observability.compile_timing import CompileTimingRecorder
 from sglang.srt.runtime_context import get_context, get_disagg, get_parallel, get_spec
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo

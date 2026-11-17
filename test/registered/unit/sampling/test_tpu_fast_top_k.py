@@ -18,7 +18,8 @@ from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorO
 from sglang.srt.layers.vocab_parallel_embedding import (
     VocabParallelEmbeddingShardIndices,
 )
-from sglang.srt.model_executor.forward_batch_info import ForwardMode, LogitsOutputMode
+from sglang.srt.model_executor.forward_batch_info import LogitsOutputMode
+from sglang.srt.model_executor.forward_mode import ForwardMode
 from sglang.srt.model_executor.runner import eager_runner as eager_runner_module
 from sglang.srt.model_executor.runner.eager_runner import EagerRunner
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo

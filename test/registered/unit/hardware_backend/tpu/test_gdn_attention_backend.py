@@ -34,7 +34,8 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.model_executor.forward_mode import ForwardMode
 from sglang.test.test_utils import CustomTestCase
 from sglang_tpu.attention_gdn_pallas import TpuGDNAttnBackend
 

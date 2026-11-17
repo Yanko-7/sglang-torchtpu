@@ -9,11 +9,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from sglang.srt.managers import scheduler as scheduler_module
-from sglang.srt.managers.schedule_batch import (
-    Modality,
-    MultimodalDataItem,
-    MultimodalInputs,
-)
+from sglang.srt.managers.req_types import MultimodalDataItem, MultimodalInputs
 from sglang.srt.managers.scheduler import Scheduler
 from sglang.srt.managers.scheduler_components import (
     batch_result_processor as processor_module,
@@ -27,6 +23,7 @@ from sglang.srt.managers.scheduler_components.batch_result_processor import (
 from sglang.srt.managers.scheduler_components.mm_feature_releaser import (
     MMFeatureReleaser,
 )
+from sglang.srt.multimodal.modality import Modality
 from sglang.srt.runtime_context import get_context
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase

@@ -24,11 +24,14 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from sglang.srt.managers.cache_controller import BatchDoneCounter, LayerDoneCounter
+from sglang.srt.managers.cache_controller import (
+    BatchDoneCounter,
+    CacheOperation,
+    LayerDoneCounter,
+)
 from sglang.srt.mem_cache.hicache_storage import PoolName, PoolTransfer
 from sglang.srt.mem_cache.hybrid_cache import hybrid_pool_assembler
 from sglang.srt.mem_cache.hybrid_cache.hybrid_cache_controller import (
-    CacheOperation,
     HybridCacheController,
 )
 from sglang.srt.mem_cache.pool_host.group import HostPoolGroup, PoolEntry
