@@ -1485,7 +1485,7 @@ class Scheduler(
         self.forward_ct = 0
         self.recompile_stance_set = False
         self.health_monitor = SchedulerHealthMonitor(
-            self.ipc_channels.send_to_tokenizer.send_output,
+            self.send_health_check_output,
             get_parallel().dp_rank if get_parallel().dp_rank is not None else 0,
         )
         self.flush_wrapper = SchedulerFlushWrapper(
@@ -2672,6 +2672,15 @@ class Scheduler(
             self.rust_server.push_control_output(recv_req, output)
         else:
             self.ipc_channels.send_to_tokenizer.send_output(output, recv_req)
+
+    def send_health_check_output(self, output) -> None:
+        """Acknowledge a health probe once a batch with real work completed."""
+        if self.rust_server is not None:
+            # The zmq tokenizer socket is not consumed in Rust mode. Rust probes
+            # share one heartbeat, which an acknowledgement on its ring advances.
+            self.rust_server.push_health_ack()
+        else:
+            self.ipc_channels.send_to_tokenizer.send_output(output)
 
     @staticmethod
     def _tokenized_requests(recv_req):
