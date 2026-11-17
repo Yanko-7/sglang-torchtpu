@@ -23,13 +23,21 @@ import jax.numpy as jnp
 
 from sglang_tpu.attention.pallas.dsa_key_store import store_keys_pallas
 from sglang_tpu.attention.pallas.mla_sparse import kv_cache_utils
-from sglang_tpu.attention.pallas.util import align_to, quantize_fp8_ue8m0
+from sglang_tpu.attention.pallas.util import align_to, cdiv, quantize_fp8_ue8m0
 from sglang_tpu.dsv4.streamindex_topk import (
     KVLayout,
     streamindex_topk,
 )
 from sglang_tpu.dsv4.streamindex_topk.streamindex_topk import (
     get_kv_cache_shape,
+)
+from sglang_tpu.kernels.deepseek_v41.index_selection.fp8.cache import (
+    PAGE_RECORDS,
+    PAGE_ROWS,
+    write_packed_pages,
+)
+from sglang_tpu.kernels.deepseek_v41.index_selection.selection import (
+    select_fp8_indexer_jax,
 )
 
 # Block sizes for the top-k kernel's (decode batch, decode tail, mixed)
@@ -102,6 +110,122 @@ def _store_keys(
         num_tokens, kv_lens, page_indices, active_cu_q_lens, page_size
     )
     return _scatter_whole_rows(cache_k, records, page, slot)
+
+
+def packed_page_size(page_rows: int) -> int:
+    """Tokens per page of a packed FP8 index-key cache with ``page_rows`` rows.
+
+    The pool pads a page's ``33 * page_size / 128`` rows to whole 8-row tiles
+    (``TpuSplitMLATokenToKVPool.packed_index_page_rows``); the padding is under
+    one tile, so the page size is the power of two at or below
+    ``page_rows * 128 / 33``.
+    """
+    bound = page_rows * PAGE_RECORDS // PAGE_ROWS
+    page_size = 1 << (bound.bit_length() - 1)
+    if align_to(cdiv(PAGE_ROWS * page_size, PAGE_RECORDS), 8) != page_rows:
+        raise ValueError(f"{page_rows} rows is not a packed FP8 index-key page")
+    return page_size
+
+
+def store_packed_keys(
+    cache_k: jax.Array,  # i32[num_pages, page_rows, 128]
+    key: jax.Array,  # float[max_num_tokens, 128]
+    kv_lens: jax.Array,
+    page_indices: jax.Array,
+    cu_q_lens: jax.Array,
+    distribution: jax.Array,
+    *,
+    interpret: bool = False,
+) -> jax.Array:
+    """Quantize this step's keys and write them into packed FP8 index-key pages.
+
+    A page holds 128-token rows: 32 rows of four FP8 features per word, then a
+    row of float32 scales (the DSV4.1 indexer's ``fp8.cache`` format). The
+    scales are this pool's UE8M0 powers of two, so the values match the
+    256-byte records bit for bit.
+    """
+    num_pages, page_rows, lanes = cache_k.shape
+    num_tokens, head_dim = key.shape
+    if lanes != PAGE_RECORDS or head_dim != PAGE_RECORDS:
+        raise ValueError(
+            f"packed index keys need 128 lanes and 128 channels, got {lanes=} "
+            f"and {head_dim=}"
+        )
+    page_size = packed_page_size(page_rows)
+    k_fp8, k_scale, _ = quantize_fp8_ue8m0(key)
+    bits = jax.lax.bitcast_convert_type(k_fp8, jnp.uint8).astype(jnp.uint32)
+    bits = bits.reshape(num_tokens, PAGE_ROWS - 1, 4)
+    words = bits[..., 0] | (bits[..., 1] << 8) | (bits[..., 2] << 16)
+    words |= bits[..., 3] << 24
+    scale = jax.lax.bitcast_convert_type(k_scale, jnp.int32)
+    values = jnp.concatenate((words.astype(jnp.int32), scale), axis=1)
+
+    # Padding rows of the batch are not stored, as in _store_keys.
+    active_cu_q_lens = jnp.minimum(cu_q_lens, cu_q_lens[distribution[2]])
+    page, slot = kv_cache_utils.get_page_and_slot(
+        num_tokens, kv_lens, page_indices, active_cu_q_lens, page_size
+    )
+    stored = (page > 0) & (page < num_pages)
+    bases = jnp.where(stored, page * page_rows, -1)
+    (flat,) = write_packed_pages(
+        (cache_k.reshape(num_pages * page_rows, lanes),),
+        bases,
+        slot,
+        values,
+        page_size=page_size,
+        interpret=interpret,
+    )
+    return flat.reshape(cache_k.shape)
+
+
+def _select_packed(
+    q_fp8: jax.Array,  # fp8[max_num_tokens, 32, 128]
+    weights: jax.Array,  # f32[max_num_tokens, 32]; query scale folded in
+    cache_k: jax.Array,  # i32[num_pages, page_rows, 128]
+    kv_lens: jax.Array,
+    page_indices: jax.Array,
+    cu_q_lens: jax.Array,
+    distribution: jax.Array,
+    *,
+    topk: int,
+) -> jax.Array:
+    """Top-k over packed FP8 pages with the DSV4.1 selector.
+
+    Rows see the keys up to their own position, as streamindex_topk's; rows
+    past the batch's real requests select nothing. Positions are counted from
+    the start of the row's sequence, -1 where nothing is selected.
+    """
+    num_pages, page_rows, lanes = cache_k.shape
+    num_tokens = q_fp8.shape[0]
+    page_size = packed_page_size(page_rows)
+    num_seqs = kv_lens.shape[0]
+    page_table = page_indices.reshape(num_seqs, -1)
+    active_cu_q_lens = jnp.minimum(cu_q_lens, cu_q_lens[distribution[2]])
+    _, seq_id, pos, valid = kv_cache_utils._row_positions(
+        num_tokens, kv_lens, active_cu_q_lens
+    )
+    lengths = jnp.where(valid, pos + 1, 0).astype(jnp.int32)
+    requests = jnp.where(valid, seq_id, -1).astype(jnp.int32)
+    layout_args = (num_pages, page_rows, 0, page_size)
+    selected, _ = select_fp8_indexer_jax(
+        q_fp8,
+        (cache_k.reshape(num_pages * page_rows, lanes),),
+        page_table,
+        weights,
+        lengths,
+        jnp.full((num_tokens, 1), -1, jnp.int32),
+        requests,
+        lengths.max().reshape(1),
+        layout_args,
+        topk,
+        8,
+        False,
+        False,
+        True,
+        page_table.shape[1] * page_size,
+        query_start_loc=active_cu_q_lens.astype(jnp.int32),
+    )
+    return selected
 
 
 def _scatter_whole_rows(
@@ -215,6 +339,26 @@ def dsa_indexer_step(
     * ``cache_k``: the cache with this step's keys stored.
     """
     q_fp8, q_scale, _ = quantize_fp8_ue8m0(query)
+    if cache_k.ndim == 3:
+        # Packed FP8 pages (index_kpool == 1): the DSV4.1 indexer's writer,
+        # scorer and top-k. key_store, decode_query_size and segments only
+        # steer the 256-byte record path.
+        cache_k = store_packed_keys(
+            cache_k, key, kv_lens, page_indices, cu_q_lens, distribution
+        )
+        weights = head_weights.astype(jnp.float32) * q_scale[..., 0] * weight_scale
+        topk_indices = _select_packed(
+            q_fp8, weights, cache_k, kv_lens, page_indices, cu_q_lens, distribution,
+            topk=topk,
+        )
+        if row_count:
+            # TODO(dsv41-index-k): score only this rank's rows. Every rank
+            # selects the whole batch for now, so the split saves no work.
+            padded = jnp.pad(topk_indices, ((0, row_count), (0, 0)), constant_values=-1)
+            topk_indices = jax.lax.dynamic_slice_in_dim(
+                padded, row_start.reshape(()), row_count
+            )
+        return topk_indices, cache_k
     if key_store == "xla":
         k_fp8, _, k_scale_byte = quantize_fp8_ue8m0(key)
         cache_k = _store_keys(

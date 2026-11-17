@@ -108,9 +108,10 @@ class TestZerosKvBuffer(CustomTestCase):
                     index_key_layers=[True, False, True],
                     index_kpool=index_kpool,
                 )
+                # Packed FP8 index keys (index_kpool == 1) need 128-token pages.
                 pool = TpuSplitMLATokenToKVPool(
-                    size=64,
-                    page_size=32,
+                    size=256,
+                    page_size=128,
                     dtype=FP8,
                     kv_lora_rank=512,
                     qk_rope_head_dim=0,
@@ -121,7 +122,7 @@ class TestZerosKvBuffer(CustomTestCase):
                 )
                 self.assertEqual(
                     pool.get_kv_size_bytes(),
-                    TpuSplitMLATokenToKVPool.bytes_per_token(**kwargs)
+                    TpuSplitMLATokenToKVPool.bytes_per_token(page_size=128, **kwargs)
                     * pool.num_pages
                     * pool.page_size,
                 )

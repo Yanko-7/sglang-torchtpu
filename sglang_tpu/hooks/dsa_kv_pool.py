@@ -30,6 +30,7 @@ def _split_pool_bytes(kvc, *, layer_ids, all_index_layers: bool) -> int:
     hf_config = kvc.model_config.hf_config
     kpool = get_dsa_index_kpool(hf_config)
     return TpuSplitMLATokenToKVPool.bytes_per_token(
+        page_size=kvc.pool_page_size,
         index_head_dim=get_dsa_index_head_dim(hf_config),
         # As the pool builders: a draft computes its own top-k.
         index_key_layers=[
