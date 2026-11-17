@@ -282,7 +282,9 @@ class TestExperimentalSpecHooks(CustomTestCase):
         stack = enter_scope(self, ExitStack())
         context = SimpleNamespace(
             deterministic=SimpleNamespace(enable_deterministic_inference=False),
-            features=SimpleNamespace(enable_custom_logit_processor=False),
+            features=SimpleNamespace(
+                enable_custom_logit_processor=False, enable_watermark=False
+            ),
         )
         stack.enter_context(
             patch(
@@ -459,7 +461,12 @@ class TestExperimentalSpecHooks(CustomTestCase):
             "meta"  # An accidental upload is observable without TPU hardware.
         )
         resolve_forward_inputs(
-            batch, SimpleNamespace(_resolve_spec_extras=lambda batch: None)
+            batch,
+            SimpleNamespace(
+                _resolve_spec_extras=lambda batch: None,
+                takes_deferred_relay=lambda batch: False,
+                flush_deferred_relay=lambda: None,
+            ),
         )
         self.assertIs(batch.input_ids, prompt)
         self.assertIsNone(batch.prefill_input_ids_cpu)
@@ -485,7 +492,12 @@ class TestExperimentalSpecHooks(CustomTestCase):
         batch.mix_running_indices = torch.tensor([0])
         with self.assertRaisesRegex(AssertionError, "mixed chunks"):
             resolve_forward_inputs(
-                batch, SimpleNamespace(_resolve_spec_extras=lambda batch: None)
+                batch,
+                SimpleNamespace(
+                    _resolve_spec_extras=lambda batch: None,
+                    takes_deferred_relay=lambda batch: False,
+                    flush_deferred_relay=lambda: None,
+                ),
             )
 
     def test_worker_publishes_plugin_owned_draft_state(self):
