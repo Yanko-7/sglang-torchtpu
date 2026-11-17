@@ -4470,11 +4470,13 @@ class Scheduler(
         req.clear_requested_finish()
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             sender = req.disagg_kv_sender
-            sender.abort()
-            # The abort seals the sender before its drain state is sampled.
-            defer_page_release = self._defer_aborted_page_release(sender)
-            if not defer_page_release:
-                sender.clear()
+            defer_page_release = False
+            if sender is not None:
+                sender.abort()
+                # The abort seals the sender before its drain state is sampled.
+                defer_page_release = self._defer_aborted_page_release(sender)
+                if not defer_page_release:
+                    sender.clear()
             self.release_prefill_sender(req, abort_sender=False)
         else:
             defer_page_release = False
