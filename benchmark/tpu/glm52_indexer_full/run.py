@@ -22,6 +22,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=("bench", "profile"), required=True)
 parser.add_argument("--out", type=Path, required=True)
 parser.add_argument("--smoke", action="store_true")
+# Profile only the decode/MTP cases at both contexts for the named arms.
+parser.add_argument("--decode-profile", action="store_true")
+parser.add_argument("--arms", nargs="+")
 args = parser.parse_args()
 args.out.mkdir(parents=True, exist_ok=True)
 
@@ -269,6 +272,8 @@ def check_slots(slots, step, q8, weights, decoded, case, variant):
 def run_case(context, queries, sequences, *, validation_only=False, padded=0, ragged=False):
     case = f"c{context}-q{queries}-s{sequences}" + ("-ragged" if ragged else "")
     step, q8, weights, decoded, values, functions, info = make_case(context, queries, sequences, padded=padded, ragged=ragged)
+    if args.arms:
+        functions = {name: fn for name, fn in functions.items() if name in args.arms}
     emit(dict(kind="case", case=case, **info))
     compiled = {}
     for name, fn in functions.items():
@@ -333,6 +338,10 @@ def run_case(context, queries, sequences, *, validation_only=False, padded=0, ra
 
 if args.smoke:
     run_case(90000, 6, 1)
+elif args.decode_profile:
+    for context in (53248, 90000):
+        for queries, sequences in ((1, 4), (6, 2), (6, 3), (6, 4)):
+            run_case(context, queries, sequences)
 elif args.mode == "bench":
     for context in (53248, 90000):
         for queries, sequences in ((1, 4), (6, 1), (6, 2), (6, 3), (6, 4), (2048, 1)):
