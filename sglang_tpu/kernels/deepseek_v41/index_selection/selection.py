@@ -906,9 +906,18 @@ def select_fp8_indexer_jax(
         score_width, layout.page_size, PACKED_FP8_MQA_CONFIG.key_tile
     )
     capacity = (score_width + width - 1) // width * width
-    chunk = max(
+    budget = max(
         PACKED_FP8_MQA_CONFIG.query_tile,
         _INDEX_UNTILED_SCORE_ELEMENTS // max(capacity, 1),
+    )
+    # Equal blocks of at most the budget's rows: a remainder would send the
+    # batch to the serial path, which scores block i + 1 only after block i's
+    # top-k, instead of the pipeline that scores it during that top-k.
+    tokens = q.shape[0]
+    blocks = max(1, -(-tokens // budget))
+    chunk = next(
+        (tokens // n for n in range(blocks, 2 * blocks + 1) if tokens % n == 0),
+        budget,
     )
     if (
         width >= score_width
