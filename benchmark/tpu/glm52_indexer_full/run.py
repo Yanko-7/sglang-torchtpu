@@ -61,6 +61,19 @@ from vllm_torchtpu.kernels.deepseek_v41.index_selection.fp8.cache import (
     PAGE_RECORDS as DSV41_PAGE, PAGE_ROWS as DSV41_PAGE_ROWS, PackedFP8Layout, read_fp8_records)
 from vllm_torchtpu.models.vllm.deepseek_v41.v2.indexer_fp8 import select_fp8_indexer_jax as dsv41_select
 
+# The same selector with one change (dsv41-single-block.patch): query blocks are
+# sized by the score-buffer budget, so a batch that fits is one dense call and
+# one top-k call, and a partial last block is masked instead of falling back to
+# the serial path. The vendored upstream files stay unmodified.
+DSV41_SINGLE = "dsv41_single_block_fp8_full"
+single_spec = importlib.util.spec_from_file_location(
+    "dsv41_single_block_indexer_fp8",
+    Path(__file__).resolve().parent / "dsv41_single_block" / "indexer_fp8.py")
+dsv41_single = importlib.util.module_from_spec(single_spec)
+sys.modules[single_spec.name] = dsv41_single
+single_spec.loader.exec_module(dsv41_single)
+DSV41_ARMS = (DSV41, DSV41_SINGLE)
+
 device = jax.devices()[0]
 runtime = dict(
     executable=sys.executable,
@@ -204,12 +217,12 @@ def make_case(context, queries, sequences, *, padded=0, ragged=False):
             )
         return call
 
-    def dsv41_path():
+    def dsv41_path(select=dsv41_select):
         # An unfiltered DSV4.1 layer: no candidate publication or sparse logits,
         # unordered selection as its attention consumes it. Mapping as torch_*.
         layout_args = (d_layout.pages, d_layout.page_stride, d_layout.page_offset, d_layout.page_size)
         def call(q, w, bank, d_table, requests, d_lens, cu_q, pages):
-            ids, _ = dsv41_select(
+            ids, _ = select(
                 q, (bank,), d_table, w, d_lens, jnp.full((q.shape[0], 1), -1, jnp.int32),
                 requests, d_lens.max().reshape(1), cu_q, layout_args,
                 2048, 8, False, False, True, d_table.shape[1] * DSV41_PAGE,
@@ -228,7 +241,9 @@ def make_case(context, queries, sequences, *, padded=0, ragged=False):
         emit(dict(kind="dsv41_cache_check", context=context, queries_per_sequence=queries,
                   sequences=len(lens), records_checked=checked, exact=True))
         functions[DSV41] = dsv41_path()
-        inputs[DSV41] = (values[0], values[1], *d_values, values[7], values[6])
+        functions[DSV41_SINGLE] = dsv41_path(dsv41_single.select_fp8_indexer_jax)
+        for name in DSV41_ARMS:
+            inputs[name] = (values[0], values[1], *d_values, values[7], values[6])
     except Exception as error:
         emit(dict(kind="error", variant=DSV41, stage="cache_repack", context=context,
                   queries_per_sequence=queries, sequences=len(lens), error=repr(error)[-4000:]))
@@ -289,7 +304,7 @@ def run_case(context, queries, sequences, *, validation_only=False, padded=0, ra
             output = compiled[name](*values[name])
             jax.block_until_ready(output)
         except Exception as error:
-            if name != DSV41:
+            if name not in DSV41_ARMS:
                 raise
             compiled.pop(name, None)
             emit(dict(kind="error", case=case, variant=name, stage="compile_or_first_call",
@@ -300,7 +315,7 @@ def run_case(context, queries, sequences, *, validation_only=False, padded=0, ra
             try:
                 check_slots(output, step, q8, weights, decoded, case, name)
             except AssertionError as error:
-                if name != DSV41:
+                if name not in DSV41_ARMS:
                     raise
                 emit(dict(kind="correctness", case=case, variant=name, passed=False, error=repr(error)[:2000]))
         for _ in range(5):

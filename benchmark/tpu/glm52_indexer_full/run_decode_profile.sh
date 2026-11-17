@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Decode/MTP xprof captures at contexts 53248 and 90000 for torch_baseline_full
-# and dsv41_upstream_fp8_full only; no bench phase.
+# and the two DSV4.1 arms (upstream, single-block selector) only; no bench phase.
 set -euo pipefail
 ulimit -c 0
 cd /workspace/sglang-torchtpu
@@ -13,5 +13,5 @@ mkdir -p "$OUT" "$ARTIFACT_LOCAL_DIR/profiling" "$ARTIFACT_LOCAL_DIR/rank-0/comp
 env | sort > "$ARTIFACT_LOCAL_DIR/profiling/env.txt"
 export LIBTPU_INIT_ARGS="$LIBTPU_INIT_ARGS --xla_xprof_register_llo_debug_info=true --xla_mosaic_dump_to=$ARTIFACT_LOCAL_DIR/rank-0/compiler/llo"
 "$PY" -u benchmark/tpu/glm52_indexer_full/run.py --mode profile --decode-profile \
-  --arms torch_baseline_full dsv41_upstream_fp8_full --out "$OUT/profiled" 2>&1 | tee "$OUT/profile.log"
+  --arms torch_baseline_full dsv41_upstream_fp8_full dsv41_single_block_fp8_full --out "$OUT/profiled" 2>&1 | tee "$OUT/profile.log"
 cp "$OUT/profiled/metrics.jsonl" "$OUT/metrics.jsonl"
