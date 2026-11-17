@@ -360,7 +360,6 @@ from sglang.srt.mem_cache.allocator.page_interleave import page_interleave_shard
 from sglang.srt.mem_cache.capacity import shares_memory
 from sglang.srt.mem_cache.common import (
     checkpoint_kv_cache,
-    release_kv_cache,
     storage_prefetch_end,
 )
 from sglang.srt.mem_cache.events import KvEventLoraNames
@@ -4515,7 +4514,7 @@ class Scheduler(
                 still_held.append(req)
                 continue
             req.disagg_kv_sender.clear()
-            self._release_deferred_abort_pages(req)
+            self.request_retirer.release_deferred_kv(req)
         self._deferred_chunked_sender_aborts = still_held
 
     def _drain_deferred_chunked_sender_aborts(self) -> None:
@@ -4543,15 +4542,8 @@ class Scheduler(
                 still_held.append(req)
                 continue
             sender.clear()
-            self._release_deferred_abort_pages(req)
+            self.request_retirer.release_deferred_kv(req)
         self._deferred_chunked_sender_aborts = still_held
-
-    def _release_deferred_abort_pages(self, req: Req) -> None:
-        """Free the pages ``request_retirer.release(defer_kv_release=True)`` kept."""
-        if req.kv.holds_kv and self.hisparse_coordinator is not None:
-            self.hisparse_coordinator.release_request(req)
-        if req.kv.holds_kv or req.kv.holds_mamba:
-            release_kv_cache(req, self.tree_cache, checkpoint=False)
 
     def _group_drained(self, senders) -> List[bool]:
         """Return drain state, coordinated across attention TP/CP on TPU."""

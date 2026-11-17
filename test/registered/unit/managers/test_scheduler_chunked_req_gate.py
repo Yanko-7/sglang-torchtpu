@@ -39,6 +39,7 @@ from sglang.test.scheduler_test_utils import (
     FakeReq,
     empty_request_lists,
     leaving_retirer,
+    release_only_retirer,
 )
 
 register_cpu_ci(est_time=40, suite="base-a-test-cpu")
@@ -237,7 +238,8 @@ def _run_chunked_abort_rank(rank: int, init_file: str) -> None:
             ),
             patch("torch.distributed.all_reduce", side_effect=all_reduce),
             patch(
-                "sglang.srt.managers.scheduler.release_kv_cache", side_effect=release
+                "sglang.srt.managers.scheduler_components.request_retirer.release_kv_cache",
+                side_effect=release,
             ) as free,
             get_context().override_server_args(),
         ):
@@ -327,6 +329,9 @@ class TestChunkedAbortNativeReadDrain(CustomTestCase):
         scheduler.tree_cache = MagicMock()
         scheduler.hisparse_coordinator = None
         scheduler.request_retirer = leaving_retirer()
+        scheduler.request_retirer.release_deferred_kv.side_effect = (
+            release_only_retirer(scheduler.tree_cache).release_deferred_kv
+        )
         scheduler.attn_tp_cpu_group = None
         scheduler.attn_cp_cpu_group = None
         return scheduler
@@ -350,7 +355,7 @@ class TestChunkedAbortNativeReadDrain(CustomTestCase):
             kv=SimpleNamespace(holds_kv=True, holds_mamba=False),
         )
 
-    @patch("sglang.srt.managers.scheduler.release_kv_cache")
+    @patch("sglang.srt.managers.scheduler_components.request_retirer.release_kv_cache")
     @patch("sglang.srt.disaggregation.prefill.maybe_release_metadata_buffer")
     @patch("sglang.srt.managers.scheduler.prepare_abort")
     def test_abort_defers_page_release_while_sender_is_not_drained(
@@ -390,7 +395,9 @@ class TestChunkedAbortNativeReadDrain(CustomTestCase):
             ),
             patch("torch.distributed.get_world_size", return_value=2) as world_size,
             patch("torch.distributed.all_reduce") as all_reduce,
-            patch("sglang.srt.managers.scheduler.release_kv_cache") as free,
+            patch(
+                "sglang.srt.managers.scheduler_components.request_retirer.release_kv_cache"
+            ) as free,
             get_context().override_server_args(),
         ):
             scheduler.process_pending_chunked_abort()
@@ -433,6 +440,7 @@ class TestChunkedAbortNativeReadDrain(CustomTestCase):
         scheduler = Scheduler.__new__(Scheduler)
         empty_request_lists(scheduler)
         scheduler.tree_cache = MagicMock()
+        scheduler.request_retirer = release_only_retirer(scheduler.tree_cache)
         scheduler.running_batch = SimpleNamespace(
             reqs=[], is_empty=lambda: True, batch_is_full=False
         )
@@ -463,7 +471,7 @@ class TestChunkedAbortNativeReadDrain(CustomTestCase):
         scheduler.draft_worker = None
         return scheduler
 
-    @patch("sglang.srt.managers.scheduler.release_kv_cache")
+    @patch("sglang.srt.managers.scheduler_components.request_retirer.release_kv_cache")
     def test_sender_drain_keeps_prefill_non_idle_until_pages_release(self, release_kv):
         sender = MagicMock()
         sender.drained.side_effect = [False, True]
@@ -553,7 +561,9 @@ class TestChunkedAbortNativeReadDrain(CustomTestCase):
         req = SimpleNamespace(disagg_kv_sender=sender, kv=_held_kv())
         scheduler._deferred_chunked_sender_aborts = [req]
 
-        with patch("sglang.srt.managers.scheduler.release_kv_cache") as release_kv:
+        with patch(
+            "sglang.srt.managers.scheduler_components.request_retirer.release_kv_cache"
+        ) as release_kv:
             with self.assertRaises(StopLoop):
                 getattr(scheduler, loop_name)()
 
