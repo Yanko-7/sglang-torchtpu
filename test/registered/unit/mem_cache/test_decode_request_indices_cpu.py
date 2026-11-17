@@ -28,7 +28,7 @@ class _UnmaterializedDeviceIndices:
 
 def _request(length):
     return SimpleNamespace(
-        kv=SimpleNamespace(kv_allocated_len=length, kv_committed_len=length),
+        kv=schedule_batch.ReqKvInfo(kv_allocated_len=length, kv_committed_len=length),
         return_logprob=False,
         grammar=None,
         return_hidden_states=False,
