@@ -42,17 +42,15 @@ from vllm_torchtpu.kernels.deepseek_v41.index_selection.fp8.tuned import (
     topk_reconstruction_threshold,
 )
 
-from vllm_torchtpu.models.vllm.deepseek_v41.v2 import indexer_select
-from vllm_torchtpu.models.vllm.deepseek_v41.v2.indexer_select import (
+from . import indexer_select
+from .indexer_select import (
     _INDEX_UNTILED_SCORE_ELEMENTS,
     _publish_candidate_blocks,
     _register,
 )
 
 if TYPE_CHECKING:
-    from vllm_torchtpu.models.vllm.deepseek_v41.v2.indexer_cache import (
-        PackedFP8IndexCacheRows,
-    )
+    from .indexer_cache import PackedFP8IndexCacheRows
 
 _query_op = None
 _write_op = None
@@ -524,16 +522,9 @@ def _select_fp8_indexer_jax(
         constant_values=-1,
     )
 
-    # One block while the [tokens, capacity] scores fit the budget: one dense
-    # call and one top-k call. Larger batches use fixed budget-sized blocks
-    # whose tail rows are masked (zero length), never a divisibility split.
-    budget_rows = max(query_tile, _INDEX_UNTILED_SCORE_ELEMENTS // capacity)
-    if prefill_chunk_rows:
-        rows = prefill_chunk_rows
-    elif tokens <= budget_rows:
-        rows = tokens
-    else:
-        rows = budget_rows // query_tile * query_tile
+    rows = prefill_chunk_rows or min(
+        tokens, max(query_tile, _INDEX_UNTILED_SCORE_ELEMENTS // capacity)
+    )
     padded = (tokens + rows - 1) // rows * rows
     # Callers group each request's queries contiguously in ascending request
     # order; padding requests (-1) trail them. Clamping padding to the last
@@ -554,8 +545,6 @@ def _select_fp8_indexer_jax(
     # Trailing padding rows belong to the last request, as in safe_requests.
     query_offsets = jnp.minimum(query_start_loc.astype(jnp.int32), tokens)
     query_offsets = query_offsets.at[-1].set(tokens)
-    # Pipelined blocks are not sorted: padding rows trail the last request.
-    pipeline_offsets = query_offsets.at[-1].set(padded)
     if padded > tokens:
         # Tile padding rows own request 0, after its rows once sorted.
         query_offsets = query_offsets.at[1:].add(padded - tokens)
@@ -600,7 +589,6 @@ def _select_fp8_indexer_jax(
         # Pipelined tiles inline inside the outer model jit so scheduling
         # metadata reaches the Pallas call instead of the inner jit boundary.
         scorer = fp8_paged_mqa_logits.__wrapped__ if pipelined else fp8_paged_mqa_logits
-        offsets = pipeline_offsets if pipelined else query_offsets
         scores = scorer(
             queries,
             pool,
@@ -608,7 +596,7 @@ def _select_fp8_indexer_jax(
             row_lengths,
             pages,
             query_start_loc=(
-                offsets if shared else jnp.clip(offsets - start, 0, rows)
+                query_offsets if shared else jnp.clip(query_offsets - start, 0, rows)
             ),
             max_model_len=capacity if stream_select else width,
             q_scale=jnp.ones_like(row_weights, dtype=jnp.float32),
@@ -665,7 +653,7 @@ def _select_fp8_indexer_jax(
         inverse = jnp.argsort(order)
         return output[inverse][:tokens], published[inverse][:tokens]
 
-    if not stream_select:
+    if not stream_select or chunk_rows is None or chunk_rows > rows or padded != tokens:
         return select_serial()
 
     def select(tile, scores, group):
@@ -705,9 +693,9 @@ def _select_fp8_indexer_jax(
     # Grouped requests need neither sorting nor output reordering, so no
     # runtime branch to the serial path: a branch costs an overlay load at its
     # entry. Score tiles may split a request; the kernel resumes it mid-group.
-    output = jnp.full((padded, topk), -1, jnp.int32)
+    output = jnp.full((tokens, topk), -1, jnp.int32)
     if publish_rows:
-        output = (output, jnp.full((padded, candidates.shape[1]), -1, jnp.int32))
+        output = (output, jnp.full(candidates.shape, -1, jnp.int32))
     pipeline = (
         indexer.pipeline_score_topk_bounded
         if prefill_chunk_rows is not None or publish_rows
@@ -726,8 +714,7 @@ def _select_fp8_indexer_jax(
     published = candidates
     if publish_rows:
         selected, published = selected
-        published = jnp.where(valid_requests[:, None], published[:tokens], -1)
-    selected = selected[:tokens]
+        published = jnp.where(valid_requests[:, None], published, -1)
     # Batch-wide short-context bypass: every visible key, as in the reference.
     # A select rather than a cond keeps the scoring path free of branches.
     short = jnp.minimum(batch_max.max(), width) <= topk

@@ -1,57 +1,16 @@
 --- dsv41_upstream/vllm_torchtpu/models/vllm/deepseek_v41/v2/indexer_fp8.py	2026-11-17 04:18:59.271711704 +0000
-+++ dsv41_single_block/indexer_fp8.py	2026-11-17 08:05:27.755181431 +0000
-@@ -42,15 +42,17 @@
-     topk_reconstruction_threshold,
- )
- 
--from . import indexer_select
--from .indexer_select import (
-+from vllm_torchtpu.models.vllm.deepseek_v41.v2 import indexer_select
-+from vllm_torchtpu.models.vllm.deepseek_v41.v2.indexer_select import (
-     _INDEX_UNTILED_SCORE_ELEMENTS,
-     _publish_candidate_blocks,
-     _register,
- )
- 
- if TYPE_CHECKING:
--    from .indexer_cache import PackedFP8IndexCacheRows
-+    from vllm_torchtpu.models.vllm.deepseek_v41.v2.indexer_cache import (
-+        PackedFP8IndexCacheRows,
-+    )
- 
- _query_op = None
- _write_op = None
-@@ -522,10 +524,16 @@
-         constant_values=-1,
++++ dsv41_single_block/indexer_fp8.py	2026-11-17 08:34:18.075150426 +0000
+@@ -523,8 +523,7 @@
      )
  
--    rows = prefill_chunk_rows or min(
+     rows = prefill_chunk_rows or min(
 -        max(tokens, query_tile),
 -        max(query_tile, _INDEX_UNTILED_SCORE_ELEMENTS // capacity),
--    )
-+    # One block while the [tokens, capacity] scores fit the budget: one dense
-+    # call and one top-k call. Larger batches use fixed budget-sized blocks
-+    # whose tail rows are masked (zero length), never a divisibility split.
-+    budget_rows = max(query_tile, _INDEX_UNTILED_SCORE_ELEMENTS // capacity)
-+    if prefill_chunk_rows:
-+        rows = prefill_chunk_rows
-+    elif tokens <= budget_rows:
-+        rows = tokens
-+    else:
-+        rows = budget_rows // query_tile * query_tile
++        tokens, max(query_tile, _INDEX_UNTILED_SCORE_ELEMENTS // capacity)
+     )
      padded = (tokens + rows - 1) // rows * rows
      # Callers group each request's queries contiguously in ascending request
-     # order; padding requests (-1) trail them. Clamping padding to the last
-@@ -546,6 +554,8 @@
-     # Trailing padding rows belong to the last request, as in safe_requests.
-     query_offsets = jnp.minimum(query_start_loc.astype(jnp.int32), tokens)
-     query_offsets = query_offsets.at[-1].set(tokens)
-+    # Pipelined blocks are not sorted: padding rows trail the last request.
-+    pipeline_offsets = query_offsets.at[-1].set(padded)
-     if padded > tokens:
-         # Tile padding rows own request 0, after its rows once sorted.
-         query_offsets = query_offsets.at[1:].add(padded - tokens)
-@@ -567,7 +577,7 @@
+@@ -567,7 +566,7 @@
          # Attention re-sorts the records; skip ID tie-breaks and output sorting.
          unordered=unordered,
      )
@@ -60,51 +19,3 @@
      # Decode top-k scans only the blocks that can hold a winner. Publishing
      # layers rank the same SparseCore block maxima for their candidates.
      select_block = block_size if publish_rows else _BLOCK_TOPK_BLOCK
-@@ -590,6 +600,7 @@
-         # Pipelined tiles inline inside the outer model jit so scheduling
-         # metadata reaches the Pallas call instead of the inner jit boundary.
-         scorer = fp8_paged_mqa_logits.__wrapped__ if pipelined else fp8_paged_mqa_logits
-+        offsets = pipeline_offsets if pipelined else query_offsets
-         scores = scorer(
-             queries,
-             pool,
-@@ -597,7 +608,7 @@
-             row_lengths,
-             pages,
-             query_start_loc=(
--                query_offsets if shared else jnp.clip(query_offsets - start, 0, rows)
-+                offsets if shared else jnp.clip(offsets - start, 0, rows)
-             ),
-             max_model_len=capacity if stream_select else width,
-             q_scale=jnp.ones_like(row_weights, dtype=jnp.float32),
-@@ -654,7 +665,7 @@
-         inverse = jnp.argsort(order)
-         return output[inverse][:tokens], published[inverse][:tokens]
- 
--    if not stream_select or chunk_rows is None or chunk_rows > rows or padded != tokens:
-+    if not stream_select:
-         return select_serial()
- 
-     def select(tile, scores, group):
-@@ -694,9 +705,9 @@
-     # Grouped requests need neither sorting nor output reordering, so no
-     # runtime branch to the serial path: a branch costs an overlay load at its
-     # entry. Score tiles may split a request; the kernel resumes it mid-group.
--    output = jnp.full((tokens, topk), -1, jnp.int32)
-+    output = jnp.full((padded, topk), -1, jnp.int32)
-     if publish_rows:
--        output = (output, jnp.full(candidates.shape, -1, jnp.int32))
-+        output = (output, jnp.full((padded, candidates.shape[1]), -1, jnp.int32))
-     pipeline = (
-         indexer.pipeline_score_topk_bounded
-         if prefill_chunk_rows is not None or publish_rows
-@@ -715,7 +726,8 @@
-     published = candidates
-     if publish_rows:
-         selected, published = selected
--        published = jnp.where(valid_requests[:, None], published, -1)
-+        published = jnp.where(valid_requests[:, None], published[:tokens], -1)
-+    selected = selected[:tokens]
-     # Batch-wide short-context bypass: every visible key, as in the reference.
-     # A select rather than a cond keeps the scoring path free of branches.
-     short = jnp.minimum(batch_max.max(), width) <= topk

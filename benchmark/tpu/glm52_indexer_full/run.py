@@ -61,13 +61,14 @@ from vllm_torchtpu.kernels.deepseek_v41.index_selection.fp8.cache import (
     PAGE_RECORDS as DSV41_PAGE, PAGE_ROWS as DSV41_PAGE_ROWS, PackedFP8Layout, read_fp8_records)
 from vllm_torchtpu.models.vllm.deepseek_v41.v2.indexer_fp8 import select_fp8_indexer_jax as dsv41_select
 
-# The same selector with one change (dsv41-single-block.patch): query blocks are
-# sized by the score-buffer budget, so a batch that fits is one dense call and
-# one top-k call, and a partial last block is masked instead of falling back to
-# the serial path. The vendored upstream files stay unmodified.
+# The same selector with one change (dsv41-single-block.patch): a batch whose
+# scores fit the budget is one block, so one dense call and one top-k call,
+# instead of gcd(tokens, 96) blocks. Larger batches keep upstream's behaviour.
+# The vendored upstream files stay unmodified.
 DSV41_SINGLE = "dsv41_single_block_fp8_full"
+# Loaded as a sibling of the upstream module so its relative imports resolve.
 single_spec = importlib.util.spec_from_file_location(
-    "dsv41_single_block_indexer_fp8",
+    "vllm_torchtpu.models.vllm.deepseek_v41.v2.indexer_fp8_single_block",
     Path(__file__).resolve().parent / "dsv41_single_block" / "indexer_fp8.py")
 dsv41_single = importlib.util.module_from_spec(single_spec)
 sys.modules[single_spec.name] = dsv41_single
