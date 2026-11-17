@@ -67,8 +67,6 @@ class _DenseKernel:
         self.queries, keys, self.scores, self.counts, self.pages, self.padding = (
             buffers[:6]
         )
-        # Pages loaded per K slot; pages past a tile's longest row are skipped.
-        self.issued = buffers[6]
         self.read_sem, self.write_sem, self.q_sem, self.page_sem, self.pad_sem = (
             semaphores[:5]
         )
@@ -144,21 +142,24 @@ class _DenseKernel:
         needed = pl.cdiv(jnp.maximum(live_pages - self.half_pages, 0), self.rest_chunk)
         return jnp.minimum(needed, self.rest_pages // self.rest_chunk)
 
+    def issued_pages(self, live_pages):
+        """Pages a prefetch issues for a tile whose rows reach `live_pages`."""
+        return self.half_pages + self.rest_chunks(live_pages) * self.rest_chunk
+
     def load_rest(self, page_slot, slot, chunks):
-        """Load `chunks` chunks past the half tile; return the pages issued."""
+        """Load `chunks` chunks of pages past the half tile."""
         if self.rest_pages:
             body = partial(self._load_chunk, page_slot, slot)
             lax.fori_loop(0, chunks, body, None)
-        return self.half_pages + chunks * self.rest_chunk
 
     def _load_chunk(self, page_slot, slot, chunk, _):
         first = self.half_pages + chunk * self.rest_chunk
         for j in range(self.rest_chunk):
             self.load_page(first + j, page_slot, slot)
 
-    def wait_keys(self, slot):
+    def wait_keys(self, slot, pages):
         # A complete tile drains in one wait; a partial one waits page by page.
-        issued = self.issued[slot]
+        issued = jnp.asarray(pages, jnp.int32)
         src = self.keys.at[slot]
         tile = pltpu.make_async_copy(src, src, self.read_sem.at[slot])
         page = self.keys.at[slot, pl.ds(0, self.layout.page_rows)]
@@ -270,16 +271,14 @@ class _QueryBlock:
     def fill_keys(self):
         # A complete K tile stays resident across query groups of one request.
         self.k.load_pages(0, self.k.tile_pages, self.page_slot(0), 0)
-        self.k.issued[0] = jnp.int32(self.k.tile_pages)
-        self.k.wait_keys(0)
+        self.k.wait_keys(0, self.k.tile_pages)
 
     def prefill(self, i):
         k = self.k
         page_slot, key_slot = self.page_slot(i), self.key_slot(i)
         self.load_table(i, wait=True)
         k.load_pages(0, k.half_pages, page_slot, key_slot)
-        chunks = k.rest_chunks(self.live_pages(i))
-        k.issued[key_slot] = k.load_rest(page_slot, key_slot, chunks)
+        k.load_rest(page_slot, key_slot, k.rest_chunks(self.live_pages(i)))
 
     def key_rows(self, tile, part, field, count):
         """`count` fields from `field` of 128-record part `part` of the tile.
@@ -326,10 +325,10 @@ class _QueryBlock:
         base = tile * k.key_tile + jnp.arange(PAGE_RECORDS)
         remaining = jnp.maximum(self.lengths_vector, 0)[:, None] - base[None, :]
         pending, depth = {}, k.config.issue_depth
-        # Half tiles interleave only the first half of the next tile's
-        # pages and drop the issue-only stages; the rest follow in a loop.
+        # Every tile interleaves only the first half of the next tile's pages;
+        # half tiles also drop the issue-only stages. The rest follow in a loop.
         split = count < k.fragments
-        inline_pages = k.half_pages if split else k.tile_pages
+        inline_pages = k.half_pages
         stages = count + depth if split else max(count + depth, k.fragments)
         page_size = k.layout.page_size
         for stage in range(stages):
@@ -357,13 +356,12 @@ class _QueryBlock:
             start, width = count * k.mxu_size, k.key_tile - count * k.mxu_size
             fill = jnp.full((k.q_tile, width), -jnp.inf, jnp.float32)
             k.scores[self.output_slot(tile), :, pl.ds(start, width)] = fill
-            if prefetch:
-                # Pages the next tile's rows cannot reach are not loaded; their
-                # stale contents are masked to -inf by the length bound.
-                chunks = k.rest_chunks(self.live_pages(tile + 2))
-                k.issued[following] = k.load_rest(metadata, following, chunks)
-        elif prefetch:
-            k.issued[following] = jnp.int32(k.tile_pages)
+        if prefetch:
+            # Pages the next tile's rows cannot reach are not loaded; their
+            # stale contents are masked to -inf by the length bound. The count
+            # depends only on that tile's rows, so its wait recomputes it.
+            chunks = k.rest_chunks(self.live_pages(tile + 2))
+            k.load_rest(metadata, following, chunks)
 
     def score_tile(self, tile, prefetch):
         # Every tile takes the masked path: the extra selects are free next
@@ -381,7 +379,8 @@ class _QueryBlock:
         # one tile ahead of the two-tile K prefetch.
         pl.when(tile + 3 < self.table_tiles)(partial(self.load_table, tile + 3))
         if not self.k.reuse_keys:
-            self.k.wait_keys(self.key_slot(tile))
+            pages = self.k.issued_pages(self.live_pages(tile))
+            self.k.wait_keys(self.key_slot(tile), pages)
         pl.when(tile >= 2)(partial(self.publish, tile - 2, wait=True))
         # One branch per tile: a per-page predicate costs scalar issue
         # slots in every fragment stage.
@@ -535,7 +534,6 @@ def fp8_paged_mqa_logits(
             pltpu.SMEM((8,), jnp.int32),
             pltpu.SMEM((4 * page_count,), jnp.int32),
             pltpu.VMEM((tile, config.key_tile), jnp.float32),
-            pltpu.SMEM((config.key_buffers,), jnp.int32),
         ),
         tuple(dma(s) for s in ((config.key_buffers,), (4, tile), (2,), (4,), (2,))),
     )
