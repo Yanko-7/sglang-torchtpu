@@ -1331,7 +1331,11 @@ class TpuSRTPlatform(SRTPlatform):
             store_dtype=kv_cache_dtype,
         )
 
+    # In-tree (SGLANG_PLATFORM=tpu) answer; the method is the tpu_oot answer.
     supports_mamba_extra_buffer = True
+
+    def support_mamba_cache_extra_buffer(self) -> bool:
+        return True
 
     def supports_mamba_prefix_cache(self, model_config) -> bool:
         from sglang.srt.configs.hybrid_arch import hybrid_gdn_config, hybrid_kda_config
@@ -1668,6 +1672,16 @@ class TpuSRTPlatform(SRTPlatform):
         if get_replica_session() is not None:
             return _ReplicaGroupCoordinator._load()
         return super().get_group_coordinator_cls()
+
+    def get_group_coordinator_device(self, local_rank: int) -> torch.device:
+        # Collectives run over the tpu_dist backend, not a device module the
+        # coordinator binds; keep the CPU binding the TPU path has always had.
+        return torch.device("cpu")
+
+    def get_moe_expert_executor_cls(self, context) -> Optional[type]:
+        # TPU serves MoE through the built-in FusedMoE with TPU quant methods,
+        # so no executor replaces it.
+        return None
 
     def init_backend(self) -> None:
         if getattr(self, "_backend_initialized", False):
