@@ -167,6 +167,12 @@ _INDEX_UNTILED_SCORE_ELEMENTS = 1 << 27
 # Keys per block maximum that block top-k reduces on SparseCore for layers
 # without candidate publication: one maximum per half 16-lane vector.
 _BLOCK_TOPK_BLOCK = 8
+# Unpublished decode tiles of at most this many rows take sc_topk_direct:
+# block top-k gives each row one subcore, so a few rows leave most of
+# SparseCore idle, while sc_topk_direct splits a row across subcores (and
+# narrows rows up to 32K keys to the batch's longest). At width 92160 on
+# TPU7x: 18 vs 30 us for 6 rows, 30 vs 30-36 us for 12, 36-42 vs 30-34 for 18.
+_DIRECT_TOPK_MAX_ROWS = 12
 
 
 def _compact_selected(records: jax.Array) -> jax.Array:
@@ -704,8 +710,16 @@ def _select_fp8_indexer_jax(
     # Decode top-k scans only the blocks that can hold a winner. Publishing
     # layers rank the same SparseCore block maxima for their candidates.
     select_block = block_size if publish_rows else _BLOCK_TOPK_BLOCK
+    direct_select = (
+        stream_select
+        and prefill_chunk_rows is None
+        and not publish_rows
+        and chunk_rows is not None
+        and chunk_rows <= _DIRECT_TOPK_MAX_ROWS
+    )
     block_select = (
         stream_select
+        and not direct_select
         and prefill_chunk_rows is None
         and chunk_rows is not None
         and block_topk.is_supported(chunk_rows, capacity, topk, select_block)
@@ -794,6 +808,13 @@ def _select_fp8_indexer_jax(
         row_lengths = jax.lax.dynamic_slice_in_dim(
             inputs[2], tile * chunk_rows, chunk_rows
         )
+        if direct_select:
+            # Imported here: the dsv4 package pulls in its attention backend.
+            from sglang_tpu.dsv4.sparsecore_topk import sparsecore_topk
+
+            return sparsecore_topk(
+                scores, topk, row_lengths, scheduling_group_id=group
+            )
         if block_select:
             # One SparseCore pass ranks the block maxima for both outputs.
             return block_topk.block_topk(
