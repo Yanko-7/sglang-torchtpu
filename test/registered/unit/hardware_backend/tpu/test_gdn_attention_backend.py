@@ -34,6 +34,7 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from sglang.srt.mem_cache.kv.alloc.id_space import IdSpace
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.forward_mode import ForwardMode
 from sglang.test.test_utils import CustomTestCase
@@ -56,6 +57,8 @@ class _BackendNoInit(TpuGDNAttnBackend):
         self._read_offsets = None
         self._req_pool_indices = None
         self._num_spec_tokens = 0
+        # Identity slot-id translation, as on a static (non-virtual) pool.
+        self._state_ids = IdSpace(key=("mamba", None))
 
 
 class TestGDNDistribution(CustomTestCase):

@@ -408,6 +408,7 @@ def test_eagle_prepare_for_decode_uses_torch_native_allocator():
         req_to_token_pool=SimpleNamespace(host_resident=True),
         req_pool_indices=req_pool_indices,
         req_pool_indices_cpu=req_pool_indices_cpu,
+        seq_lens_cpu=torch.tensor([3, 1], dtype=torch.int64),
         device=torch.device("cpu"),
         enable_overlap=False,
         spec_info=None,
@@ -554,6 +555,8 @@ def test_eagle_prepare_for_decode_builds_device_accept_window_for_paged_tpu(
         req_to_token_pool=SimpleNamespace(host_resident=True, req_to_token=table),
         req_pool_indices=torch.tensor([1], dtype=torch.int64),
         req_pool_indices_cpu=torch.tensor([1], dtype=torch.int64),
+        # Unset so the assertion below checks the device-accept prep writes it.
+        seq_lens_cpu=None,
         device=torch.device("cpu"),
         enable_overlap=True,
         spec_info=draft_input,

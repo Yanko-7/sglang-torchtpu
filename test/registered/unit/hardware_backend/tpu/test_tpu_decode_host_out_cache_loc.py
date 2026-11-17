@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 import torch
 
 from sglang.srt.environ import envs
+from sglang.srt.managers.schedule_batch import ReqKvInfo
 from sglang.srt.mem_cache import allocation
 from sglang.srt.mem_cache.allocator import swa
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
@@ -102,18 +103,20 @@ def _batch(allocator, pool, seq_lens, rows, device):
     return SimpleNamespace(
         maybe_evict_swa=lambda: None,
         seq_lens_cpu=seq_lens,
+        device=device,
         seq_lens=seq_lens.to(device),
         req_pool_indices_cpu=rows,
         req_pool_indices=rows.to(device),
         tree_cache=SimpleNamespace(
             page_size=PAGE,
+            req_to_token_pool=pool,
             token_to_kv_pool_allocator=allocator,
             supports_prefix_sharing=lambda: False,
         ),
         req_to_token_pool=pool,
         model_config=SimpleNamespace(is_encoder_decoder=False),
         reqs=[
-            SimpleNamespace(kv=SimpleNamespace(kv_allocated_len=n, kv_committed_len=n))
+            SimpleNamespace(kv=ReqKvInfo(kv_allocated_len=n, kv_committed_len=n))
             for n in seq_lens.tolist()
         ],
     )
@@ -219,8 +222,15 @@ class TestAllocForDecodeHostResidentPool(CustomTestCase):
         pool.req_to_token[1, :3] = torch.arange(12, 15)
         result = torch.tensor(DECODE_LOCS[0], dtype=torch.int64)
         allocator = Mock(
-            spec=["page_size", "alloc_decode", "free", "forward_write_target"],
+            spec=[
+                "page_size",
+                "alloc_decode",
+                "free",
+                "forward_write_target",
+                "storage",
+            ],
             page_size=PAGE,
+            storage=None,
             forward_write_target=nullcontext,
         )
         allocator.alloc_decode.return_value = result
