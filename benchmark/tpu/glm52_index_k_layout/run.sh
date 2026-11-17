@@ -24,5 +24,6 @@ for test in \
   fi
 done
 
-"$PY" -u benchmark/tpu/glm52_index_k_layout/compare.py --out "$OUT/compare" 2>&1 | tee "$OUT/compare.log"
+"$PY" -u benchmark/tpu/glm52_index_k_layout/compare.py --out "$OUT/compare" \
+    --contexts "${CONTEXTS:-53248,90000}" 2>&1 | tee "$OUT/compare.log"
 cp "$OUT/compare/metrics.jsonl" "$OUT/metrics.jsonl"

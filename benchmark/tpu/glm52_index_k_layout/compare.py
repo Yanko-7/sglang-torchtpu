@@ -27,6 +27,8 @@ from sglang_tpu.attention.pallas.util import quantize_fp8_ue8m0
 parser = argparse.ArgumentParser()
 parser.add_argument("--out", type=Path, required=True)
 parser.add_argument("--smoke", action="store_true")
+parser.add_argument("--contexts", default="53248,90000",
+                    help="comma-separated sequence lengths; the page table stays WIDTH wide")
 args = parser.parse_args()
 args.out.mkdir(parents=True, exist_ok=True)
 
@@ -212,7 +214,7 @@ def run_case(context, queries, sequences):
 
 cases = [(90000, 6, 4)] if args.smoke else [
     (context, q, s)
-    for context in (53248, 90000)
+    for context in (int(c) for c in args.contexts.split(","))
     for q, s in ((1, 4), (6, 1), (6, 2), (6, 3), (6, 4), (2048, 1))
 ]
 for case in cases:
