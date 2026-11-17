@@ -272,6 +272,12 @@ class SRTPlatform(DeviceMixin):
         buffer_info = device_pool.get_device_pool_infos()[0].buffer_info
         return get_mha_host_pool_cls(buffer_info)
 
+    def get_device_pool_kv_host_cls(self, device_pool) -> Optional[type]:
+        """Return a host (L2) KV pool class built from ``device_pool`` itself,
+        for a device layout no buffer info describes; None builds the host
+        pool from the device pool's buffer info."""
+        return None
+
     def get_hicache_explicit_size_context(self) -> AbstractContextManager[None]:
         """Scope host-pool construction for an explicit HiCache ratio or size.
 

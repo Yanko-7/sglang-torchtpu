@@ -145,6 +145,39 @@ def _mha_host_inputs(pool, info, drafts=()):
     )
 
 
+def _device_pool_host_cls(pool) -> Optional[type]:
+    # A platform host pool built from the device pool itself (TPU's fused
+    # pages), for a layout no buffer info describes.
+    from sglang.srt.platforms import current_platform
+
+    return current_platform.get_device_pool_kv_host_cls(pool)
+
+
+def _build_device_pool_host(
+    host_cls: type,
+    pool: Any,
+    *,
+    host_to_device_ratio: float,
+    host_size: float,
+    page_size: int,
+    layout: str,
+    allocator_type: str,
+    pool_label: str,
+    drafts: tuple[Any, ...] = (),
+):
+    kwargs = {"mtp_draft_device_pools": tuple(drafts)} if drafts else {}
+    return host_cls(
+        pool,
+        host_to_device_ratio=host_to_device_ratio,
+        host_size=host_size,
+        page_size=page_size,
+        layout=layout,
+        allocator_type=allocator_type,
+        pool_label=pool_label,
+        **kwargs,
+    )
+
+
 def build_kv_host_pool(
     *,
     kv_pool: Any,
@@ -153,6 +186,19 @@ def build_kv_host_pool(
     mtp_draft_device_pools: tuple[Any, ...] = (),
     pool_label: str = "kv",
 ):
+    device_pool_host_cls = _device_pool_host_cls(kv_pool)
+    if device_pool_host_cls is not None:
+        return _build_device_pool_host(
+            device_pool_host_cls,
+            kv_pool,
+            host_to_device_ratio=get_memory().hicache_ratio,
+            host_size=get_memory().hicache_size if host_size is None else host_size,
+            page_size=page_size,
+            layout=get_memory().hicache_mem_layout,
+            allocator_type=_get_allocator_type(),
+            pool_label=pool_label,
+            drafts=mtp_draft_device_pools,
+        )
     host_input = kv_pool.get_device_pool_infos()[0].buffer_info
     use_mla = isinstance(host_input, MLABufferInfo)
     if use_mla:
@@ -430,18 +476,32 @@ def _draft_swa_entry(
     # from full attention. Use a separate host pool with KV indices instead of
     # packing their bytes into either target pool.
     first, *rest = drafts
-    host_input = first.get_device_pool_infos()[0].buffer_info
-    host_cls, host_kwargs = _mha_host_inputs(first, host_input, tuple(rest))
-    draft_host_pool = host_cls(
-        host_input,
-        host_to_device_ratio=kv_host_pool.size / first.size,
-        host_size=0,
-        page_size=page_size,
-        layout=get_memory().hicache_mem_layout,
-        allocator_type=_get_allocator_type(),
-        **host_kwargs,
-        pool_label="draft_swa",
-    )
+    device_pool_host_cls = _device_pool_host_cls(first)
+    if device_pool_host_cls is not None:
+        draft_host_pool = _build_device_pool_host(
+            device_pool_host_cls,
+            first,
+            host_to_device_ratio=kv_host_pool.size / first.size,
+            host_size=0,
+            page_size=page_size,
+            layout=get_memory().hicache_mem_layout,
+            allocator_type=_get_allocator_type(),
+            pool_label="draft_swa",
+            drafts=tuple(rest),
+        )
+    else:
+        host_input = first.get_device_pool_infos()[0].buffer_info
+        host_cls, host_kwargs = _mha_host_inputs(first, host_input, tuple(rest))
+        draft_host_pool = host_cls(
+            host_input,
+            host_to_device_ratio=kv_host_pool.size / first.size,
+            host_size=0,
+            page_size=page_size,
+            layout=get_memory().hicache_mem_layout,
+            allocator_type=_get_allocator_type(),
+            **host_kwargs,
+            pool_label="draft_swa",
+        )
     return build_pool_entry(
         name=PoolName.DRAFT_SWA,
         host_pool=draft_host_pool,
@@ -1728,6 +1788,18 @@ def _build_mha_mla_host_pool(
     dcp_rank: int = 0,
 ):
     is_mha = isinstance(buffer_info, MHABufferInfo)
+    device_pool_host_cls = _device_pool_host_cls(pool) if is_mha else None
+    if device_pool_host_cls is not None:
+        return _build_device_pool_host(
+            device_pool_host_cls,
+            pool,
+            host_to_device_ratio=host_to_device_ratio,
+            host_size=0,
+            page_size=page_size,
+            layout=layout,
+            allocator_type=allocator_type,
+            pool_label=pool_label,
+        )
     # The global layout is page_first_kv_split only when the target model
     # uses MLA; that layout is MLA-specific, so MHA draft pools must use
     # the non-MLA layout (NPU default: page_first_direct).

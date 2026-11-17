@@ -1421,6 +1421,23 @@ class TpuSRTPlatform(SRTPlatform):
             return TpuFusedMHATokenToKVPoolHost
         return MHATokenToKVPoolHost
 
+    def get_device_pool_kv_host_cls(self, device_pool) -> Optional[type]:
+        # The TPU host pools mirror the device pool's fused pages, which no
+        # buffer info describes, so they build from the device pool. MLA pools
+        # keep the upstream MLA host pool.
+        from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool
+        from sglang_tpu.kv_pool_host import (
+            TpuDMAHostKVPool,
+            TpuFusedMHATokenToKVPoolHost,
+        )
+
+        if isinstance(device_pool, MLATokenToKVPool):
+            return None
+        host_cls = self.get_mha_kv_pool_host_cls(device_pool)
+        if issubclass(host_cls, (TpuDMAHostKVPool, TpuFusedMHATokenToKVPoolHost)):
+            return host_cls
+        return None
+
     def get_mla_kv_pool_cls(self) -> type:
         # pallas_tpu_mla uses the paged fused latent layout the MLA v2 kernel
         # addresses; other backends (torch_native reference) keep the flat
