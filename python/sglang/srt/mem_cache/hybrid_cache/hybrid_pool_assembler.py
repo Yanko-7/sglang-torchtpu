@@ -37,7 +37,10 @@ from sglang.srt.mem_cache.pool_host import HostPoolGroup, PoolEntry
 from sglang.srt.mem_cache.pool_host.common import get_allocator_type
 from sglang.srt.mem_cache.pool_host.dsa import DSAIndexerPoolHost
 from sglang.srt.mem_cache.pool_host.mamba import MambaPoolHost
-from sglang.srt.mem_cache.pool_host.mha import MHATokenToKOnlyPoolHost
+from sglang.srt.mem_cache.pool_host.mha import (
+    MHATokenToKOnlyPoolHost,
+    get_mha_host_pool_cls,
+)
 from sglang.srt.mem_cache.pool_host.mla import MLATokenToKVPoolHost
 from sglang.srt.mem_cache.pool_host.npu_host_memory import (
     reserve_dsv4_paged_host_memory,
@@ -126,13 +129,8 @@ def _device_capacity_tokens(pool) -> int:
 
 
 def _mha_host_inputs(pool, info, drafts=()):
-    # The MHA host-pool class is a platform decision (TPU substitutes its
-    # fused/raiden host pools); the platform default delegates to
-    # get_mha_host_pool_cls.
-    from sglang.srt.platforms import current_platform
-
     return (
-        current_platform.get_mha_kv_pool_host_cls(pool),
+        get_mha_host_pool_cls(info),
         dict(
             device_capacity_tokens=_device_capacity_tokens(pool),
             start_layer=pool.start_layer,
@@ -328,11 +326,21 @@ def _build_cache_controller(
     storage_backend_extra_config: Optional[dict],
     enable_storage_metrics: bool,
     kv_storage=None,
-    cache_controller_cls: type = HybridCacheController,
+    cache_controller_cls: Optional[type] = None,
 ) -> HybridCacheController:
     memory = get_memory()
-    # The io backend may need its own controller class (a TPU DMA backend).
-    return cache_controller_cls.create_for_backend(
+    from sglang.srt.platforms import current_platform
+
+    # A strategy's own controller class, else the io backend's (a platform may
+    # need its own), else the in-tree controller.
+    if cache_controller_cls is not None:
+        make_controller = cache_controller_cls.create_for_backend
+    else:
+        make_controller = (
+            current_platform.get_hybrid_cache_controller_cls(memory.hicache_io_backend)
+            or HybridCacheController
+        )
+    return make_controller(
         params.token_to_kv_pool_allocator,
         host_pool_group,
         params.page_size,
@@ -1271,7 +1279,7 @@ def build_hybrid_mamba_stack(
     enable_storage_metrics: bool = False,
     kv_host_pool_fn: Optional[Callable[..., Any]] = None,
     mamba_host_pool_fn: Optional[Callable[..., Any]] = None,
-    cache_controller_cls: type = HybridCacheController,
+    cache_controller_cls: Optional[type] = None,
 ) -> tuple[HostPoolGroup, HybridCacheController, HostPoolGroupConfig]:
     """KV plus every pool the hybrid pool declares (e.g. a sparse indexer),
     then the Mamba state pool, which keeps its own host path.
@@ -2253,7 +2261,7 @@ class MambaStrategy(StackStrategy):
     # subclasses this and overrides the three host-stack factories.
     kv_host_pool_fn: Optional[Callable[..., Any]] = None
     mamba_host_pool_fn: Optional[Callable[..., Any]] = None
-    cache_controller_cls: type = HybridCacheController
+    cache_controller_cls: Optional[type] = None
 
     def matches(self, kvcache, components):
         return kvcache.layer_router.wrapped_view() is not None and components == {

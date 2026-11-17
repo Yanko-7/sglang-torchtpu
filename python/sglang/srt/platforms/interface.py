@@ -278,6 +278,12 @@ class SRTPlatform(DeviceMixin):
         pool from the device pool's buffer info."""
         return None
 
+    def get_hybrid_cache_controller_cls(self, io_backend: str) -> Optional[type]:
+        """Return the hybrid HiCache controller class for ``io_backend`` when
+        it needs its own (e.g. a backend with no device streams); None uses the
+        in-tree ``HybridCacheController``."""
+        return None
+
     def get_hicache_explicit_size_context(self) -> AbstractContextManager[None]:
         """Scope host-pool construction for an explicit HiCache ratio or size.
 

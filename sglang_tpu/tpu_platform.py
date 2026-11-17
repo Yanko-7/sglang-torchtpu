@@ -1442,6 +1442,17 @@ class TpuSRTPlatform(SRTPlatform):
             return host_cls
         return None
 
+    def get_hybrid_cache_controller_cls(self, io_backend: str) -> Optional[type]:
+        # A TPU DMA backend has no device streams and drives per-pool
+        # all-layer DMAs, so it needs its own hybrid controller.
+        if not is_tpu_dma_hicache_backend(io_backend):
+            return None
+        from sglang_tpu.tpu_dma_hybrid_cache_controller import (
+            TpuDMAHybridCacheController,
+        )
+
+        return TpuDMAHybridCacheController
+
     def get_mla_kv_pool_cls(self) -> type:
         # pallas_tpu_mla uses the paged fused latent layout the MLA v2 kernel
         # addresses; other backends (torch_native reference) keep the flat
