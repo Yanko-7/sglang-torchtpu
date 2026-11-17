@@ -65,8 +65,8 @@ class TestZerosKvBuffer(CustomTestCase):
 
     def test_split_pool_allocates_the_buffers_the_sparse_kernels_read(self):
         pool = TpuSplitMLATokenToKVPool(
-            size=64,
-            page_size=32,
+            size=256,
+            page_size=128,
             dtype=FP8,
             kv_lora_rank=512,
             qk_rope_head_dim=64,
@@ -76,21 +76,22 @@ class TestZerosKvBuffer(CustomTestCase):
             index_head_dim=128,
             index_key_layers=[True, False, True],
         )
-        # Per token: 512 NoPE bytes, 64 RoPE bytes padded to 128, and a
-        # 256-byte index-key record. Each buffer must be a whole uint8 tensor,
-        # not a view, or the ops cannot update it in place and copy the pool.
+        # Per token: 512 NoPE bytes, 64 RoPE bytes padded to 128, and packed
+        # FP8 index keys: 33 int32 rows per 128-token page, padded to 40. Each
+        # buffer must be a whole tensor of its dtype, not a view, or the ops
+        # cannot update it in place and copy the pool.
         expected = {
-            pool.get_nope_cache: (pool.num_pages, 32, 4, 128),
-            pool.get_rope_cache: (pool.num_pages, 8, 4, 128),
-            pool.get_index_key_cache: (pool.num_pages, 8, 4, 256),
+            pool.get_nope_cache: ((pool.num_pages, 128, 4, 128), torch.uint8),
+            pool.get_rope_cache: ((pool.num_pages, 32, 4, 128), torch.uint8),
+            pool.get_index_key_cache: ((pool.num_pages, 40, 128), torch.int32),
         }
         total_bytes = 0
-        for accessor, shape in expected.items():
+        for accessor, (shape, dtype) in expected.items():
             layers = (0, 2) if accessor == pool.get_index_key_cache else (0, 1, 2)
             for layer_id in layers:
                 buf = accessor(layer_id)
                 self.assertEqual(tuple(buf.shape), shape)
-                self.assertEqual(buf.dtype, torch.uint8)
+                self.assertEqual(buf.dtype, dtype)
                 self.assertIsNone(buf._base)
                 total_bytes += buf.nbytes
         # A layer that reuses the previous layer's result must have no cache.
