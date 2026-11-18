@@ -91,7 +91,7 @@ def prepare(model: Path, output: Path):
         attention_backend="pallas_tpu_mla_sparse",
         moe_runner_backend="pallas_tpu",
         kv_cache_dtype="fp8_e4m3",
-        page_size=64,
+        page_size=128,
         context_length=92160,
         chunked_prefill_size=32768,
         max_prefill_tokens=32768,
