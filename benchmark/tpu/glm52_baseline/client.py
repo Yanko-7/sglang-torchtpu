@@ -225,7 +225,7 @@ def summarize(records, loads, cached, per_dp, out, label):
         assert record["meta"]["prompt_tokens"] == cached + (4096 if per_dp == 1 else 16)
         # The final cached page can require recomputing one page for the logits.
         hit = record["meta"].get("cached_tokens", -1)
-        assert cached - 64 <= hit <= cached, (record["label"], hit, cached)
+        assert cached - 128 <= hit <= cached, (record["label"], hit, cached)
     tpot, ttft = [], []
     for r in records:
         events = [
@@ -387,7 +387,7 @@ async def main(a):
         minimum_capacity = min(
             row["max_total_num_tokens"] for row in capacities["loads"]
         )
-        unique_slots = 4 * ((90000 + 1024 + 6 + 63) // 64) * 64
+        unique_slots = 4 * ((90000 + 1024 + 6 + 127) // 128) * 128
         decode_mode = a.decode_prefix
         if decode_mode == "auto":
             decode_mode = "unique" if minimum_capacity >= unique_slots else "shared"
