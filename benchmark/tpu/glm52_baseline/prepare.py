@@ -98,7 +98,7 @@ def prepare(model: Path, output: Path):
         max_running_requests=64,
         torch_compile_max_bs=4,
         tpu_compile_bs=[1, 2, 3, 4],
-        tpu_compile_tokens=[64, 2048],
+        tpu_compile_tokens=[64, 128, 2048],
         enable_torch_compile=True,
         disable_radix_cache=False,
         mem_fraction_static=0.85,
