@@ -134,18 +134,26 @@ def freeze_inputs(tokenizer_path, source, out, decode_prefix_mode):
     return tokenizer, ids
 
 
-async def profile(session, base, delay=3.0, steps=5):
-    """One xprof capture of `steps` forward steps, `delay` s into a batch.
+def profile_plan():
+    """GLM52_PROFILE: comma-separated `label:delay_s:steps` captures (opt-in)."""
+    plan = {}
+    for item in filter(None, os.environ.get("GLM52_PROFILE", "").split(",")):
+        label, delay, steps = item.split(":")
+        plan[label] = (float(delay), int(steps))
+    return plan
 
-    Opt-in (GLM52_PROFILE_LABEL names the batch). Every rank writes its trace
-    under its own artifact directory; the traced batch's timings are not
-    measurements.
+
+async def profile(session, base, label, delay, steps):
+    """One xprof capture of `steps` forward steps, `delay` s into batch `label`.
+
+    Every rank writes its trace under its own artifact directory; the traced
+    batch's timings are not measurements.
     """
     await asyncio.sleep(delay)
     payload = dict(
         output_dir=str(Path(os.environ["ARTIFACT_LOCAL_DIR"]) / "xprof"),
         num_steps=steps,
-        profile_prefix="decode",
+        profile_prefix=label,
     )
     # /start_profile answers in plain text, so not through api().
     async with session.post(base + "/start_profile", json=payload) as r:
@@ -225,8 +233,8 @@ async def batch(session, base, inputs, output_len, out, label, synchronized=Fals
             )
         monitoring = asyncio.create_task(monitor())
         profiling = None
-        if label == os.environ.get("GLM52_PROFILE_LABEL"):
-            profiling = asyncio.create_task(profile(session, base))
+        if label in (plan := profile_plan()):
+            profiling = asyncio.create_task(profile(session, base, label, *plan[label]))
         results = await asyncio.gather(*tasks)
         if profiling:
             await profiling
