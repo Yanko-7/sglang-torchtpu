@@ -167,6 +167,12 @@ _INDEX_UNTILED_SCORE_ELEMENTS = 1 << 27
 # Keys per block maximum that block top-k reduces on SparseCore for layers
 # without candidate publication: one maximum per half 16-lane vector.
 _BLOCK_TOPK_BLOCK = 8
+# Unpublished decode tiles of at most this many rows take sc_topk_direct:
+# block top-k gives each row one subcore, so a few rows leave most of
+# SparseCore idle, while sc_topk_direct splits a row across subcores (and
+# narrows rows up to 32K keys to the batch's longest). At width 92160 on
+# TPU7x: 18 vs 30 us for 6 rows, 30 vs 30-36 us for 12, 36-42 vs 30-34 for 18.
+_DIRECT_TOPK_MAX_ROWS = 12
 
 
 def _compact_selected(records: jax.Array) -> jax.Array:
@@ -701,17 +707,15 @@ def _select_fp8_indexer_jax(
         unordered=unordered,
     )
     chunk_rows = rows
-    # Publishing layers rank SparseCore block maxima for their candidates.
+    # Decode top-k scans only the blocks that can hold a winner. Publishing
+    # layers rank the same SparseCore block maxima for their candidates.
     select_block = block_size if publish_rows else _BLOCK_TOPK_BLOCK
-    # Other decode tiles take sc_topk_direct: it splits a row across
-    # subcores and narrows rows up to 32K keys to the batch's longest, where
-    # block top-k gives each row one subcore. On TPU7x, 4-6 rows: 10-18 vs
-    # 16-36 us from 8K to 92K keys.
     direct_select = (
         stream_select
         and prefill_chunk_rows is None
         and not publish_rows
         and chunk_rows is not None
+        and chunk_rows <= _DIRECT_TOPK_MAX_ROWS
     )
     block_select = (
         stream_select
