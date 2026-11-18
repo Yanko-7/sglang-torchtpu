@@ -46,7 +46,7 @@ def main():
         speculative_draft_model_quantization="fp8",
         enable_dp_lm_head=True,
         kv_cache_dtype="fp8_e4m3",
-        page_size=64,
+        page_size=128,
         disable_radix_cache=False,
         moe_runner_backend="pallas_tpu",
         attention_backend="pallas_tpu_mla_sparse",
