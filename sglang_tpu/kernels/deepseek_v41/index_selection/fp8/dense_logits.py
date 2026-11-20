@@ -14,7 +14,13 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from .cache import PAGE_RECORDS, PAGE_ROWS, PackedFP8Layout
+from .cache import (
+    PAGE_RECORDS,
+    PAGE_ROWS,
+    PackedFP8Layout,
+    bank_word_rows,
+    bank_words,
+)
 from .common import (
     QueryTile,
     _dma_rows,
@@ -33,7 +39,7 @@ _ISSUE_DEPTH = 8
 
 def _encode_page_table(page_ids, layout, first_bank_rows):
     """Records hold the bank-local row << 2, a valid bit and the bank bit."""
-    valid = (page_ids >= 0) & (page_ids < layout.pages)
+    valid = (page_ids > 0) & (page_ids < layout.pages)
     # Spread masked reads: repeating page zero serializes a partially filled tile.
     safe = jnp.where(valid, page_ids, jnp.arange(page_ids.shape[-1]) % layout.pages)
     global_rows = layout.page_offset + safe * layout.page_stride
@@ -58,7 +64,8 @@ class _DenseKernel:
         self.offsets, self.lengths, query_start = smem
         self.config, self.layout, self.reuse_keys = config, layout, reuse_keys
         self.mxu_size, self.sublanes = info.mxu_column_size, info.num_sublanes
-        self.q, weights, self.pool, self.table = inputs
+        self.q, weights, pool, self.table = inputs
+        self.pool = tuple(bank_words(bank) for bank in pool)
         buffers, semaphores = scratch
         self.queries, keys, self.scores, self.counts, self.pages, self.padding = (
             buffers[:6]
@@ -441,10 +448,12 @@ def fp8_paged_mqa_logits(
 
     Args:
         q: FP8 E4M3FN [T,32,128], in request order.
-        kv_cache: One or two int32 [rows,128] banks in fp8.cache format.
+        kv_cache: One or two banks in fp8.cache format: int32 [rows,128], or
+            uint8 [pages,page_rows,4,128] pages of the same bytes.
         weights: FP32 [T,32]; weighted BF16 products must be finite.
         context_lens: Int32 [T] visible index-key counts, zero for padding.
-        block_table: Int32 [G,P] page IDs covering the requested output width.
+        block_table: Int32 [G,P] page IDs covering the requested output width;
+            page 0 is the null page and is never read.
         query_start_loc: Int32 [G+1], monotonic from 0 to T; repeats mean empty.
         max_model_len: Nonnegative output width in index keys.
         q_scale: FP32 [T,32] query scales; K scales reside inside each page.
@@ -458,7 +467,7 @@ def fp8_paged_mqa_logits(
     tokens, heads, dim = q.shape
     tokens = tokens if query_count is None else query_count
     banks = kv_cache if isinstance(kv_cache, tuple) else (kv_cache,)
-    bank_rows = tuple(bank.shape[0] for bank in banks)
+    bank_rows = tuple(bank_word_rows(bank) for bank in banks)
     layout = cache_layout or PackedFP8Layout(sum(bank_rows) // PAGE_ROWS)
     layout.validate(bank_rows)
     if layout.page_size % PAGE_RECORDS:
@@ -478,8 +487,8 @@ def fp8_paged_mqa_logits(
     tile_pages = config.key_tile // layout.page_size
     page_ids = block_table[:, :page_count]
     pad = ((0, 0), (0, page_count - page_ids.shape[1]))
-    page_ids = jnp.pad(page_ids, pad, constant_values=-1)
-    table = _encode_page_table(page_ids, layout, banks[0].shape[0])
+    page_ids = jnp.pad(page_ids, pad)
+    table = _encode_page_table(page_ids, layout, bank_rows[0])
     page_count = pl.cdiv(tile_pages, info.num_lanes) * info.num_lanes
     table = table.reshape(page_ids.shape[0], -1, tile_pages)
     table = jnp.pad(table, ((0, 0), (0, 0), (0, page_count - tile_pages)))

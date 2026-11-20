@@ -54,13 +54,14 @@ def _candidate_fixture(counts, short, seed=371):
     rng = np.random.default_rng(seed)
     width, page_size, block, count, padding = 4096, 128, 8, 128, 3
     groups = len(counts)
-    layout = PackedFP8Layout(groups * width // page_size, page_size=page_size)
+    # Page 0 is the null page; requests own pages 1 and up.
+    layout = PackedFP8Layout(1 + groups * width // page_size, page_size=page_size)
     keys = jnp.asarray(rng.normal(size=(layout.pages * page_size, 128)), jnp.bfloat16)
     records = jnp.arange(keys.shape[0], dtype=jnp.int32)
     banks = jax.jit(lambda b: write_fp8_records(b, records, keys, layout))(
         _zero_banks(layout)
     )
-    pages = rng.permutation(layout.pages).reshape(groups, -1).astype(np.int32)
+    pages = 1 + rng.permutation(layout.pages - 1).reshape(groups, -1).astype(np.int32)
     # Contiguous request rows with causal lengths, then invalid padding rows.
     owners = np.concatenate(
         [np.repeat(np.arange(groups), counts), np.full(padding, -1)]

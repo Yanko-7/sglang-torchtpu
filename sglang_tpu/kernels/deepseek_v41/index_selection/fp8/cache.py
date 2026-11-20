@@ -25,6 +25,26 @@ PAGE_ROWS = 33
 PACKED_FP8_WRITE_BATCH = 128
 
 
+def bank_word_rows(bank) -> int:
+    """Rows of 128 int32 words in a bank.
+
+    A bank is int32 [rows, 128], or uint8 [pages, page_rows, 4, 128] pages
+    holding the same bytes: byte b of word [r, t] is element [r, b, t].
+    """
+    if bank.dtype == jnp.uint8:
+        return bank.shape[0] * bank.shape[1]
+    return bank.shape[0]
+
+
+def bank_words(bank_ref):
+    """An int32 [rows, 128] view of a bank ref, in place for uint8 pages."""
+    if bank_ref.dtype != jnp.uint8:
+        return bank_ref
+    pages, rows, packing, lanes = bank_ref.shape
+    words = bank_ref.reshape(pages * rows, packing, lanes).bitcast(jnp.int32)
+    return words.reshape(pages * rows, lanes)
+
+
 def quantize_index_rows(values: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Return E4M3 values, FP32 scales and E8M0 scale bytes for D128 vectors."""
     # One power-of-two scale covers each post-RoPE vector, independent of layout.
@@ -93,7 +113,8 @@ class PackedFP8Layout:
 
 
 def _record_addresses(records: jax.Array, layout: PackedFP8Layout):
-    valid = (records >= 0) & (records < layout.pages * layout.page_size)
+    # Page 0 is the null page: its records are never written or read.
+    valid = (records >= layout.page_size) & (records < layout.pages * layout.page_size)
     safe = jnp.clip(records, 0, layout.pages * layout.page_size - 1)
     base = layout.page_offset + (safe // layout.page_size) * layout.page_stride
     return base, safe % layout.page_size, valid
@@ -110,11 +131,11 @@ def write_fp8_records(
         return _write_fp8_records_native(banks, records, keys, layout)
     layout.validate(tuple(bank.shape[0] for bank in banks))
     bases, columns, valid = _record_addresses(records, layout)
-    bases = jnp.where(valid, bases, -1)
+    bases = jnp.where(valid, bases, 0)
     count = records.size
     first_rows = banks[0].shape[0]
     total_rows = sum(bank.shape[0] for bank in banks)
-    valid = (bases >= 0) & (bases + layout.page_rows <= first_rows)
+    valid = (bases > 0) & (bases + layout.page_rows <= first_rows)
     valid |= (bases >= first_rows) & (bases + layout.page_rows <= total_rows)
     bases, order = jax.lax.sort_key_val(
         jnp.where(valid, bases, total_rows), jnp.arange(count, dtype=jnp.int32)
@@ -161,7 +182,7 @@ def _write_fp8_records_native(
     if jax.default_backend() == "tpu":
         return write_packed_pages(
             banks,
-            jnp.where(valid, base, -1),
+            jnp.where(valid, base, 0),
             columns,
             values,
             page_size=layout.page_size,
@@ -220,18 +241,21 @@ def write_packed_pages(
     page_size: int | None = None,
     interpret: bool = False,
 ) -> tuple[jax.Array, ...]:
-    """Update unique token slots in one or two banks using global row bases."""
+    """Update unique token slots in one or two banks using global row bases.
+
+    Base 0 (page 0, the null page) and bases past the banks are skipped.
+    """
     count, fields = values.shape
     if not count:
         return banks
-    page_tokens = banks[0].shape[1]
+    page_tokens = banks[0].shape[-1]
     page_size = page_tokens if page_size is None else page_size
     page_rows = pl.cdiv(fields * page_size, page_tokens)
     padded_fields = page_rows * page_tokens // page_size
-    first_rows = banks[0].shape[0]
-    total_rows = sum(bank.shape[0] for bank in banks)
+    first_rows = bank_word_rows(banks[0])
+    total_rows = sum(bank_word_rows(bank) for bank in banks)
     batch = min(count, PACKED_FP8_WRITE_BATCH)
-    valid = (bases >= 0) & (bases + page_rows <= first_rows)
+    valid = (bases > 0) & (bases + page_rows <= first_rows)
     if len(banks) == 2:
         valid |= (bases >= first_rows) & (bases + page_rows <= total_rows)
     bases, order = jax.lax.sort_key_val(
@@ -266,15 +290,15 @@ def _write_sorted_packed_pages(
     page_size: int,
     interpret: bool,
 ):
-    page_tokens = banks[0].shape[1]
+    page_tokens = banks[0].shape[-1]
     page_rows = pl.cdiv(fields * page_size, page_tokens)
     padded_fields = page_rows * page_tokens // page_size
-    first_rows = banks[0].shape[0]
-    total_rows = sum(bank.shape[0] for bank in banks)
+    first_rows = bank_word_rows(banks[0])
+    total_rows = sum(bank_word_rows(bank) for bank in banks)
     batch = min(count, PACKED_FP8_WRITE_BATCH)
 
     def kernel(base_ref, column_ref, value_ref, *refs):
-        outputs = refs[len(banks) : 2 * len(banks)]
+        outputs = [bank_words(ref) for ref in refs[len(banks) : 2 * len(banks)]]
         pages, sem = refs[2 * len(banks) :]
 
         def first(record):

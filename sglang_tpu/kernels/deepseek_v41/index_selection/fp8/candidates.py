@@ -328,9 +328,7 @@ def canonical_candidate_blocks(
         )
     elif per_query % alignment:
         raise ValueError("Direct candidate metadata requires lane-aligned query rows")
-    table = jnp.pad(
-        table, ((0, 0), (0, -table.shape[1] % alignment)), constant_values=-1
-    )
+    table = jnp.pad(table, ((0, 0), (0, -table.shape[1] % alignment)))
     live = jnp.max(jnp.where(offsets[1:] > offsets[:-1], jnp.arange(1, rows + 1), 0))
     control = jnp.full((lanes,), live, jnp.int32)
     offset_width = pl.cdiv(offsets.size, alignment) * alignment
@@ -468,7 +466,7 @@ def canonical_candidate_blocks(
                     (owner != 0)
                     & (logical < blocks)
                     & (logical * block < table.shape[1] * page_size)
-                    & (page >= 0)
+                    & (page > 0)
                     & (page < cache_pages)
                 )
                 for part in range(1, parts):
@@ -677,7 +675,7 @@ def _resolve_blocks_sc(blocks, table, block, cache_pages, page_size):
     table_width, per_page = table.shape[1], page_size // block
     columns = pl.cdiv(count, 128) * 128
     blocks = jnp.pad(blocks, ((0, 0), (0, columns - count)), constant_values=-1)
-    table = jnp.pad(table, ((0, 0), (0, -table_width % 128)), constant_values=-1)
+    table = jnp.pad(table, ((0, 0), (0, -table_width % 128)))
     mesh = plsc.VectorSubcoreMesh(core_axis_name="core", subcore_axis_name="subcore")
 
     @pl.kernel(
@@ -710,7 +708,7 @@ def _resolve_blocks_sc(blocks, table, block, cache_pages, page_size):
                 valid = (
                     (selected >= 0)
                     & (selected < table_width * per_page)
-                    & (page >= 0)
+                    & (page > 0)
                     & (page < cache_pages)
                 )
                 physical_block_ids[pl.ds(i, lanes)] = jnp.where(
@@ -771,7 +769,7 @@ def resolve_candidate_blocks(
     valid = (
         (sparse_blocks >= 0)
         & (sparse_blocks < limit)
-        & (pages >= 0)
+        & (pages > 0)
         & (pages < cache_pages)
     )
     return jnp.where(valid, pages * per_page + safe % per_page, -1)
