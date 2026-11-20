@@ -98,33 +98,60 @@ class TestZerosKvBuffer(CustomTestCase):
             pool.get_index_key_cache(1)
         self.assertEqual(pool.get_kv_size_bytes(), total_bytes)
 
+    def test_split_pool_packs_index_keys_on_128_token_pages(self):
+        pool = TpuSplitMLATokenToKVPool(
+            size=256,
+            page_size=128,
+            dtype=FP8,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            layer_num=3,
+            device="cpu",
+            enable_memory_saver=False,
+            index_head_dim=128,
+            index_key_layers=[True, False, True],
+        )
+        # The DSV4.1 indexer's packed FP8 pages: 33 rows of 128 words per 128
+        # tokens, byte b of word [r, t] at [r, b, t], so 132 bytes per token.
+        for layer_id in (0, 2):
+            buf = pool.get_index_key_cache(layer_id)
+            self.assertEqual(tuple(buf.shape), (pool.num_pages, 33, 4, 128))
+            self.assertEqual(buf.dtype, torch.uint8)
+            self.assertIsNone(buf._base)
+            self.assertEqual(buf.nbytes, pool.num_pages * pool.page_size * 132)
+
     def test_split_pool_bytes_per_token_is_what_it_allocates(self):
         # The KV budget divides free memory by bytes_per_token, so it must count
-        # every buffer, the pooled indexer's bf16 raw buffer included.
-        for index_kpool in (1, 4):
-            with self.subTest(index_kpool=index_kpool):
-                kwargs = dict(
-                    index_head_dim=128,
-                    index_key_layers=[True, False, True],
-                    index_kpool=index_kpool,
-                )
-                pool = TpuSplitMLATokenToKVPool(
-                    size=64,
-                    page_size=32,
-                    dtype=FP8,
-                    kv_lora_rank=512,
-                    qk_rope_head_dim=0,
-                    layer_num=3,
-                    device="cpu",
-                    enable_memory_saver=False,
-                    **kwargs,
-                )
-                self.assertEqual(
-                    pool.get_kv_size_bytes(),
-                    TpuSplitMLATokenToKVPool.bytes_per_token(**kwargs)
-                    * pool.num_pages
-                    * pool.page_size,
-                )
+        # every buffer, the pooled indexer's bf16 raw buffer included. Page 128
+        # packs the index keys unless the indexer is pooled.
+        for page_size in (32, 128):
+            for index_kpool in (1, 4):
+                with self.subTest(page_size=page_size, index_kpool=index_kpool):
+                    self._check_bytes_per_token(page_size, index_kpool)
+
+    def _check_bytes_per_token(self, page_size, index_kpool):
+        kwargs = dict(
+            index_head_dim=128,
+            index_key_layers=[True, False, True],
+            index_kpool=index_kpool,
+        )
+        pool = TpuSplitMLATokenToKVPool(
+            size=2 * page_size,
+            page_size=page_size,
+            dtype=FP8,
+            kv_lora_rank=512,
+            qk_rope_head_dim=0,
+            layer_num=3,
+            device="cpu",
+            enable_memory_saver=False,
+            **kwargs,
+        )
+        self.assertEqual(
+            pool.get_kv_size_bytes(),
+            TpuSplitMLATokenToKVPool.bytes_per_token(page_size=page_size, **kwargs)
+            * pool.num_pages
+            * pool.page_size,
+        )
 
 
 class TestQuantizeKvToFp8(CustomTestCase):

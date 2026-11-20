@@ -1272,7 +1272,11 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
 
     Each layer that runs its own DSA indexer also gets an index-key buffer. It
     uses the same page table. A layer that reuses the previous layer's top-k
-    result has no index-key buffer. With a pooled indexer (``index_kpool > 1``,
+    result has no index-key buffer. Without a pooled indexer and with pages of
+    whole 128-token rows, it holds the DSV4.1 indexer's packed FP8 pages,
+    ``[num_pages, 33 * page_size // 128, 4, 128]``: 132 bytes per token, byte b
+    of word [r, t] at [r, b, t]. Otherwise it holds 256-byte records, ``[num_pages,
+    page_size // 4, 4, 256]``. With a pooled indexer (``index_kpool > 1``,
     GLM-5.3-Flash) the index-key buffer holds one record per pool, in the page of
     the pool's tokens (``page_size // index_kpool`` records per page), so a
     request never writes a page another request shares through the radix tree.
@@ -1292,6 +1296,10 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
     LANE_BYTES = 128
     # The RoPE and index-key buffers store this many tokens per row of a page.
     TOKENS_PER_ROW = 4
+    # Packed FP8 index keys: a row holds one 32-bit word of 128 tokens, and a
+    # token takes 32 words of four FP8 features plus one float32 scale.
+    PACKED_INDEX_TOKENS_PER_ROW = 128
+    PACKED_INDEX_WORDS = 33
 
     def __init__(
         self,
@@ -1372,6 +1380,7 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
     def bytes_per_token(
         cls,
         *,
+        page_size: int,
         index_head_dim: int,
         index_key_layers: list[bool],
         index_kpool: int,
@@ -1379,7 +1388,10 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
     ) -> int:
         """Bytes one token takes across all layers' buffers, as allocated.
         A raw ring is sized by request slots, not tokens, so it is not counted."""
-        index_bytes = cls.index_key_record_bytes(index_head_dim) // index_kpool
+        if cls.packs_index_keys(page_size, index_head_dim, index_kpool):
+            index_bytes = cls.PACKED_INDEX_WORDS * torch.int32.itemsize
+        else:
+            index_bytes = cls.index_key_record_bytes(index_head_dim) // index_kpool
         if index_kpool > 1 and not raw_ring:
             index_bytes += 2 * index_head_dim * torch.bfloat16.itemsize
         layer_bytes = cls.NOPE_BYTES + cls.LANE_BYTES
@@ -1398,6 +1410,22 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
         key_bytes = _cdiv(index_head_dim, lane) * lane
         return _cdiv(key_bytes + key_bytes // lane, lane) * lane
 
+    @classmethod
+    def packs_index_keys(
+        cls, page_size: int, index_head_dim: int, index_kpool: int
+    ) -> bool:
+        """Whether the index keys use packed FP8 pages rather than records.
+
+        The DSV4.1 indexer kernels read 128-wide keys in pages of whole
+        128-token rows. The pooled indexer and glm_flash_megakernel still read
+        the records.
+        """
+        return (
+            index_kpool == 1
+            and index_head_dim == 128
+            and page_size % cls.PACKED_INDEX_TOKENS_PER_ROW == 0
+        )
+
     def _create_buffers(self):
         rows_per_page = self.page_size // self.TOKENS_PER_ROW
         nope_shape = (
@@ -1412,12 +1440,23 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
             self.TOKENS_PER_ROW,
             self.LANE_BYTES,
         )
-        index_key_shape = (
-            self.num_pages,
-            rows_per_page // self._index_kpool,
-            self.TOKENS_PER_ROW,
-            self.index_key_record_bytes(self._index_head_dim),
-        )
+        if self.packs_index_keys(
+            self.page_size, self._index_head_dim, self._index_kpool
+        ):
+            lanes = self.PACKED_INDEX_TOKENS_PER_ROW
+            index_key_shape = (
+                self.num_pages,
+                self.PACKED_INDEX_WORDS * self.page_size // lanes,
+                torch.int32.itemsize,
+                lanes,
+            )
+        else:
+            index_key_shape = (
+                self.num_pages,
+                rows_per_page // self._index_kpool,
+                self.TOKENS_PER_ROW,
+                self.index_key_record_bytes(self._index_head_dim),
+            )
         logger.info(
             "Allocating split TPU MLA KV buffers: layers=%d, nope=%s, rope=%s, "
             "index keys=%s on %d layers",
