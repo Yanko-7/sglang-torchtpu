@@ -9,8 +9,8 @@ only the physical buffers for the shapes the V4.1 Pallas kernels read:
 - Main KV, kv_source layers: FP8 latent words int32 [R, 128] + fp32 scales [R];
   record = full_loc // r, R = ceil((full_size + 256) / 256) * (256 // r), so a main
   page holds 256 // r records and its id is the full page id.
-- Indexer K, kv_source layers: packed FP8 int32 [P * 33, 128] with
-  PackedFP8Layout(P, page_size=128); record = full_loc // r, P = R // 128.
+- Indexer K, kv_source layers: packed FP8 uint8 [P, 33, 4, 128], 128 records a
+  page; record = full_loc // r, P = R // 128.
 
 The allocators reserve logical page 0, so SWA pages 0..3, main page 0 and the
 indexer pages of full page 0 are never written. Every buffer is a base tensor
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-from dataclasses import dataclass
 from typing import Mapping, Optional, Sequence, Tuple
 from unittest.mock import patch
 
@@ -42,39 +41,13 @@ from sglang.srt.utils import ceil_div
 from sglang_tpu.dsv4.dsv4_memory_pool import _zeros_kv_buffer
 
 try:
-    from sglang_tpu.kernels.index_selection.fp8.cache import (
-        PAGE_RECORDS,
-        PAGE_ROWS,
-        PackedFP8Layout,
-    )
+    from sglang_tpu.kernels.index_selection.fp8.cache import PAGE_RECORDS, PAGE_ROWS
 except ModuleNotFoundError as exc:
     if exc.name != "jax" and not (exc.name or "").startswith("jax."):
         raise
+    # Without JAX (CPU unit tests), the same packed FP8 page constants.
     PAGE_RECORDS = 128
     PAGE_ROWS = 33
-
-    @dataclass(frozen=True)
-    class PackedFP8Layout:  # type: ignore[no-redef]
-        """Pure-Python layout fallback when JAX is absent (CPU unit tests)."""
-
-        pages: int
-        page_stride: int = PAGE_ROWS
-        page_offset: int = 0
-        page_size: int = PAGE_RECORDS
-
-        @property
-        def page_rows(self) -> int:
-            return (PAGE_ROWS * self.page_size + PAGE_RECORDS - 1) // PAGE_RECORDS
-
-        def validate(self, bank_rows: Tuple[int, ...]) -> None:
-            if (
-                self.pages < 1
-                or self.page_stride < self.page_rows
-                or self.page_offset < 0
-                or len(bank_rows) != 1
-                or self.page_offset + self.pages * self.page_stride > bank_rows[0]
-            ):
-                raise ValueError("Packed FP8 page addresses exceed their owners")
 
 
 logger = logging.getLogger(__name__)
@@ -207,7 +180,7 @@ class DSV41TPUMainKVPool(DeepSeekV4SingleKVPool):
 
 
 class DSV41TPUIndexerPool(DeepSeekV4IndexerPool):
-    """Per kv_source layer packed FP8 index keys int32 [P * 33, 128]."""
+    """Per kv_source layer packed FP8 index keys uint8 [P, 33, 4, 128]."""
 
     def __init__(
         self,
@@ -224,13 +197,11 @@ class DSV41TPUIndexerPool(DeepSeekV4IndexerPool):
             f"got {index_head_dim}"
         )
         self.ratio = ratio
-        self.layout = PackedFP8Layout(
-            num_index_pages(full_size, ratio), page_size=PAGE_RECORDS
-        )
+        self.pages = num_index_pages(full_size, ratio)
         super().__init__(
-            self.layout.pages * PAGE_RECORDS,
+            self.pages * PAGE_RECORDS,
             PAGE_RECORDS,
-            torch.int32,
+            torch.uint8,
             index_head_dim,
             layer_num,
             device,
@@ -240,10 +211,9 @@ class DSV41TPUIndexerPool(DeepSeekV4IndexerPool):
         )
 
     def _create_buffer(self) -> None:
-        rows = self.layout.pages * self.layout.page_stride
-        self.layout.validate((rows,))
+        shape = (self.pages, PAGE_ROWS, 4, WORD_LANES)
         self.index_k_with_scale_buffer = [
-            _zeros_kv_buffer((rows, WORD_LANES), torch.int32, self.device)
+            _zeros_kv_buffer(shape, torch.uint8, self.device)
             for _ in range(self.layer_num)
         ]
 
@@ -373,7 +343,7 @@ class DSV41TPUTokenToKVPool(DeepSeekV4TokenToKVPool):
             self.swa_kv_pool.num_pages,
             self.sources_by_ratio,
             {r: p.num_records for r, p in self.kv_pools.items() if p is not None},
-            {r: p.layout.pages for r, p in self.index_pools.items()},
+            {r: p.pages for r, p in self.index_pools.items()},
         )
 
     # ------------------------------------------------------------------ #
@@ -523,16 +493,10 @@ class DSV41TPUTokenToKVPool(DeepSeekV4TokenToKVPool):
         return pool.kv_buffer[source_id], pool.scale_buffer[source_id]
 
     def get_index_k(self, layer_id: int) -> torch.Tensor:
-        """Packed FP8 int32 [P * 33, 128] of the layer's kv_source."""
+        """Packed FP8 uint8 [P, 33, 4, 128] of the layer's kv_source."""
         self.wait_layer_transfer(layer_id)
         ratio, source_id = self._low_ratio_item(layer_id)
         return self.index_pools[ratio].index_k_with_scale_buffer[source_id]
-
-    def index_k_layout(self, layer_id: int) -> Tuple[int, int, int, int]:
-        """PackedFP8Layout fields (pages, page_stride, page_offset, page_size)."""
-        ratio, _ = self._low_ratio_item(layer_id)
-        layout = self.index_pools[ratio].layout
-        return layout.pages, layout.page_stride, layout.page_offset, layout.page_size
 
     def main_page_records(self, layer_id: int) -> int:
         ratio, _ = self._low_ratio_item(layer_id)

@@ -562,14 +562,13 @@ def _query_start_loc(requests: jax.Array, num_requests: int) -> jax.Array:
 
 def _select_fp8_indexer_jax(
     q: jax.Array,
-    banks: tuple[jax.Array, ...],
+    cache: jax.Array,
     page_table: jax.Array,
     weights: jax.Array,
     lengths: jax.Array,
     candidates: jax.Array,
     requests: jax.Array,
     batch_max: jax.Array,
-    layout_args: tuple[int, ...],
     topk: int,
     block_size: int,
     candidate_write: bool,
@@ -580,7 +579,7 @@ def _select_fp8_indexer_jax(
     query_start_loc: jax.Array | None = None,
     prefill_chunk_rows: int | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    layout = PackedFP8Layout(*layout_args)
+    layout = PackedFP8Layout.of(cache)
     tokens, width = q.shape[0], score_width
     if tokens == 0:
         return jnp.empty((0, min(topk, width)), jnp.int32), candidates
@@ -602,7 +601,7 @@ def _select_fp8_indexer_jax(
                     (q.shape[0], min(topk, width)), -1, jnp.int32
                 ), candidates
             gathered_candidates = prepare_candidates(
-                banks, page_table, candidates, requests, layout, block_size, width
+                cache, page_table, candidates, requests, block_size, width
             )
             return _score_and_select_candidates(
                 q,
@@ -619,14 +618,13 @@ def _select_fp8_indexer_jax(
             jnp.minimum(batch_max.max(), width) <= topk,
             lambda: select_fp8_indexer_jax(
                 q,
-                banks,
+                cache,
                 page_table,
                 weights,
                 lengths,
                 candidates,
                 requests,
                 batch_max,
-                layout_args,
                 topk,
                 block_size,
                 False,
@@ -709,8 +707,6 @@ def _select_fp8_indexer_jax(
         and chunk_rows is not None
         and block_topk.is_supported(chunk_rows, capacity, topk, select_block)
     )
-    pool = banks[0] if len(banks) == 1 else banks
-
     def score(start, rows, inputs, *, pipelined, group=None):
         """Scores of `rows` queries from `start`; decode tiles share the inputs."""
         shared = pipelined and prefill_chunk_rows is None
@@ -724,7 +720,7 @@ def _select_fp8_indexer_jax(
         scorer = fp8_paged_mqa_logits.__wrapped__ if pipelined else fp8_paged_mqa_logits
         scores = scorer(
             queries,
-            pool,
+            cache,
             row_weights.astype(jnp.float32),
             row_lengths,
             pages,
@@ -734,7 +730,6 @@ def _select_fp8_indexer_jax(
             max_model_len=capacity if stream_select else width,
             q_scale=jnp.ones_like(row_weights, dtype=jnp.float32),
             query_size=query_tile,
-            cache_layout=layout,
             query_start=start if shared else 0,
             query_count=rows,
             reuse_keys=prefill_chunk_rows is not None and capacity == key_tile,
@@ -866,14 +861,13 @@ def _select_fp8_indexer_jax(
 
 def select_fp8_indexer_jax(
     q: jax.Array,
-    banks: tuple[jax.Array, ...],
+    cache: jax.Array,
     page_table: jax.Array,
     weights: jax.Array,
     lengths: jax.Array,
     candidates: jax.Array,
     requests: jax.Array,
     batch_max: jax.Array,
-    layout_args: tuple[int, ...],
     topk: int,
     block_size: int,
     candidate_write: bool,
@@ -886,21 +880,20 @@ def select_fp8_indexer_jax(
     """Select exact FP8 scores with a bounded, overlapped prefill working set."""
     arguments = (
         q,
-        banks,
+        cache,
         page_table,
         weights,
         lengths,
         candidates,
         requests,
         batch_max,
-        layout_args,
         topk,
         block_size,
         candidate_write,
         sparse_logits,
         unordered,
     )
-    layout = PackedFP8Layout(*layout_args)
+    layout = PackedFP8Layout.of(cache)
     width = paged_mqa_key_tile(
         score_width, layout.page_size, PACKED_FP8_MQA_CONFIG.key_tile
     )
@@ -955,24 +948,15 @@ def select_fp8_indexer_jax(
 
 
 def prepare_fp8_candidates(
-    banks: tuple[jax.Array, ...],
+    cache: jax.Array,
     page_table: jax.Array,
     candidates: jax.Array,
     requests: jax.Array,
-    layout: tuple[int, ...],
     block: int,
     width: int,
 ) -> tuple[jax.Array, ...]:
     return tuple(
-        prepare_candidates(
-            banks,
-            page_table,
-            candidates,
-            requests,
-            PackedFP8Layout(*layout),
-            block,
-            width,
-        )
+        prepare_candidates(cache, page_table, candidates, requests, block, width)
     )
 
 

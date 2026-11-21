@@ -37,7 +37,11 @@ from sglang_tpu.kernels.index_selection.selection import (
 
 
 def _pack(keys, layout):
-    """Feature-major pages: field f of record r at row-word f * page_size + r."""
+    """Feature-major pages: field f of record r at row-word f * page_size + r.
+
+    Returns the uint8 [pages, page_rows, 4, 128] cache: byte b of word [r, t]
+    at [r, b, t].
+    """
     values, scales, _ = quantize_index_rows(keys)
     bits = np.asarray(jax.lax.bitcast_convert_type(values, jnp.uint8))
     bits = bits.astype(np.uint32).reshape(-1, 32, 4)
@@ -46,14 +50,15 @@ def _pack(keys, layout):
         (words.view(np.int32), np.asarray(scales).view(np.int32)[:, None]), axis=1
     )
     size, records = layout.page_size, np.arange(len(keys))
-    words_at = (records // size * layout.page_stride * 128)[:, None]
+    words_at = (records // size * layout.page_rows * 128)[:, None]
     words_at = (
         words_at + np.arange(PAGE_ROWS)[None, :] * size + (records % size)[:, None]
     )
-    pool = np.zeros(layout.pages * layout.page_stride * 128, np.int32)
+    pool = np.zeros(layout.pages * layout.page_rows * 128, np.int32)
     pool[words_at] = fields
+    cache = pool.view(np.uint8).reshape(layout.pages, layout.page_rows, 128, 4)
     dequantized = values.astype(jnp.float32) * scales[:, None]
-    return pool.reshape(-1, 128), dequantized
+    return np.ascontiguousarray(cache.swapaxes(2, 3)), dequantized
 
 
 @pytest.mark.parametrize(
@@ -76,14 +81,13 @@ def test_paged_mqa_logits_matches_reference(page_size, max_model_len):
     table[2, 1] = 0
     keys = jnp.asarray(rng.normal(size=(layout.pages * page_size, 128)), jnp.bfloat16)
     pool, dequantized = _pack(keys, layout)
-    split = int(layout.pages * 0.6) * layout.page_stride
     tokens = len(lengths)
     q = jnp.asarray(rng.normal(size=(tokens, 32, 128)), jnp.float8_e4m3fn)
     weights = jnp.asarray(rng.uniform(0.01, 0.1, (tokens, 32)), jnp.float32)
 
     result = fp8_paged_mqa_logits(
         q,
-        (jnp.asarray(pool[:split]), jnp.asarray(pool[split:])),
+        jnp.asarray(pool),
         weights,
         jnp.asarray(lengths, jnp.int32),
         jnp.asarray(table, jnp.int32),
@@ -93,7 +97,6 @@ def test_paged_mqa_logits_matches_reference(page_size, max_model_len):
         max_model_len=max_model_len,
         q_scale=jnp.ones_like(weights),
         query_size=6,
-        cache_layout=layout,
     )
     scores = np.asarray(result)
 
@@ -135,19 +138,17 @@ def test_unsorted_requests_select_own_pages():
     table = rng.integers(1, layout.pages, (groups, width // page_size)).astype(np.int32)
     q = jnp.asarray(rng.normal(size=(tokens, 32, 128)), jnp.float8_e4m3fn)
     weights = jnp.asarray(rng.uniform(0.01, 0.1, (tokens, 32)), jnp.float32)
-    layout_args = (layout.pages, layout.page_stride, layout.page_offset, page_size)
     selected = np.asarray(
         jax.jit(
             lambda q, w, n: select_fp8_indexer_jax(
                 q,
-                (pool,),
+                pool,
                 jnp.asarray(table),
                 w,
                 n,
                 jnp.empty((tokens, 0), jnp.int32),
                 jnp.asarray(requests, jnp.int32),
                 n.max().reshape(1),
-                layout_args,
                 topk,
                 8,
                 False,
@@ -171,7 +172,6 @@ def test_unsorted_requests_select_own_pages():
             max_model_len=width,
             q_scale=jnp.ones_like(weights),
             query_size=6,
-            cache_layout=layout,
         )
     )
     scores = np.empty_like(sorted_scores)

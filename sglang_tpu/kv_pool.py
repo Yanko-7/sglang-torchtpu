@@ -1423,7 +1423,9 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
         return (
             index_kpool == 1
             and index_head_dim == 128
+            # The kernels read pages of a power of two of whole 128-token rows.
             and page_size % cls.PACKED_INDEX_TOKENS_PER_ROW == 0
+            and page_size & (page_size - 1) == 0
         )
 
     def _create_buffers(self):

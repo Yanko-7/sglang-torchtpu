@@ -6,8 +6,8 @@ Single bank, one device per process (no mesh). Each op is a
 ``sglang_tpu.kernels.index_selection``. ``write_index_k`` donates
 the cache and returns its new value; the caller does ``index_k.copy_(result)``.
 
-Layout (``memory_pool.DSV41TPUTokenToKVPool.get_index_k``): INT32
-``[P * 33, 128]``, ``PackedFP8Layout(P, 33, 0, 128)``. Record ``full_loc // r``
+Layout (``memory_pool.DSV41TPUTokenToKVPool.get_index_k``): uint8
+``[P, 33, 4, 128]``, 128 records a page. Record ``full_loc // r``
 lives on indexer page ``record // 128``; the per-request indexer page table is
 ``expand_index_page_table`` of the full page table for ratio 1 (full page p ->
 indexer pages 2p, 2p + 1) and the full page table itself for ratio 2.
@@ -28,8 +28,6 @@ import torch
 
 from sglang_tpu.kernels.index_selection.fp8.cache import (
     PAGE_RECORDS,
-    PAGE_ROWS,
-    PackedFP8Layout,
     quantize_index_rows,
     write_fp8_records,
 )
@@ -53,16 +51,9 @@ _OPS_LOCK = Lock()
 
 
 def _write_index_k(
-    index_k: jax.Array,
-    records: jax.Array,
-    keys: jax.Array,
-    pages: int,
-    page_stride: int,
-    page_offset: int,
-    page_size: int,
+    index_k: jax.Array, records: jax.Array, keys: jax.Array
 ) -> jax.Array:
-    layout = PackedFP8Layout(pages, page_stride, page_offset, page_size)
-    return write_fp8_records((index_k,), records, keys.astype(jnp.bfloat16), layout)[0]
+    return write_fp8_records(index_k, records, keys.astype(jnp.bfloat16))
 
 
 def _compact(ids: jax.Array) -> jax.Array:
@@ -85,18 +76,13 @@ def _select(
     requests: jax.Array,
     lengths: jax.Array,
     candidates: jax.Array,
-    pages: int,
-    page_stride: int,
-    page_offset: int,
-    page_size: int,
     topk: int,
     block_size: int,
     publish: bool,
     consume: bool,
 ) -> tuple[jax.Array, jax.Array]:
-    layout_args = (pages, page_stride, page_offset, page_size)
     tokens, count = candidates.shape
-    width = index_pages.shape[1] * page_size
+    width = index_pages.shape[1] * PAGE_RECORDS
     k = min(topk, width)
     if tokens == 0:
         return jnp.empty((0, k), jnp.int32), candidates
@@ -117,14 +103,13 @@ def _select(
         q8, q_scales, _ = quantize_index_rows(q)
         selected, published = select_fp8_indexer_jax(
             q8,
-            (index_k,),
+            index_k,
             index_pages,
             weights.astype(jnp.float32) * q_scales,
             lengths,
             candidates,
             requests,
             batch_max,
-            layout_args,
             topk,
             block_size,
             publish,
@@ -148,16 +133,11 @@ def _prepare_candidates(
     index_pages: jax.Array,
     candidates: jax.Array,
     requests: jax.Array,
-    pages: int,
-    page_stride: int,
-    page_offset: int,
-    page_size: int,
     block_size: int,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    layout_args = (pages, page_stride, page_offset, page_size)
-    width = index_pages.shape[1] * page_size
+    width = index_pages.shape[1] * PAGE_RECORDS
     return prepare_fp8_candidates(
-        (index_k,), index_pages, candidates, requests, layout_args, block_size, width
+        index_k, index_pages, candidates, requests, block_size, width
     )
 
 
@@ -193,15 +173,15 @@ def _select_prepared(
 # =============================================================================
 
 
-def _fake_write_index_k(index_k, records, keys, *_):
+def _fake_write_index_k(index_k, records, keys):
     return torch.empty_like(index_k)
 
 
 def _fake_select(
     q, weights, index_k, index_pages, requests, lengths, candidates, *static_args
 ):
-    page_size, topk = static_args[3], static_args[4]
-    width = index_pages.shape[1] * page_size
+    topk = static_args[0]
+    width = index_pages.shape[1] * PAGE_RECORDS
     return (
         q.new_empty((q.shape[0], min(topk, width)), dtype=torch.int32),
         torch.empty_like(candidates),
@@ -270,17 +250,14 @@ def write_index_k(
     index_k: torch.Tensor,
     records: torch.Tensor,
     keys: torch.Tensor,
-    layout: tuple[int, int, int, int],
 ) -> torch.Tensor:
     """Quantize normed, RoPE'd BF16 ``keys`` [N, 128] and write them at ``records``.
 
     ``records`` [N] i32 is ``full_loc // r`` per compressed key; -1 skips, and
-    valid records must be unique. ``layout`` is ``pool.index_k_layout(layer)``.
+    valid records must be unique.
     Returns the new ``index_k``; the caller does ``index_k.copy_(...)``.
     """
-    return _op("write_index_k")(
-        index_k, _i32(records), keys.reshape(-1, PAGE_RECORDS), *layout
-    )
+    return _op("write_index_k")(index_k, _i32(records), keys.reshape(-1, PAGE_RECORDS))
 
 
 def select(
@@ -291,7 +268,6 @@ def select(
     requests: torch.Tensor,
     lengths: torch.Tensor,
     candidates: torch.Tensor,
-    layout: tuple[int, int, int, int],
     *,
     topk: int = INDEX_TOPK,
     block_size: int = CANDIDATE_BLOCK_SIZE,
@@ -325,7 +301,6 @@ def select(
         _i32(requests),
         _i32(lengths).reshape(-1),
         _i32(candidates),
-        *layout,
         topk,
         block_size,
         publish,
@@ -344,7 +319,6 @@ def prepare_candidates(
     index_pages: torch.Tensor,
     candidates: torch.Tensor,
     requests: torch.Tensor,
-    layout: tuple[int, int, int, int],
     *,
     block_size: int = CANDIDATE_BLOCK_SIZE,
 ) -> tuple[torch.Tensor, ...]:
@@ -360,7 +334,6 @@ def prepare_candidates(
         _i32(index_pages),
         _i32(candidates),
         _i32(requests),
-        *layout,
         block_size,
     )
 
@@ -389,8 +362,3 @@ def select_prepared(
         topk,
         block_size,
     )
-
-
-def index_k_rows(pages: int) -> int:
-    """INT32 rows of a ``pages``-page cache."""
-    return pages * PAGE_ROWS

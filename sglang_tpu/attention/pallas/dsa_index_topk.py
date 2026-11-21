@@ -33,7 +33,8 @@ from sglang_tpu.dsv4.streamindex_topk.streamindex_topk import (
 )
 from sglang_tpu.kernels.index_selection.fp8.cache import (
     PAGE_RECORDS,
-    PAGE_ROWS,
+    PackedFP8Layout,
+    pack_fp8_words,
     write_packed_pages,
 )
 from sglang_tpu.kernels.index_selection.selection import (
@@ -120,18 +121,6 @@ def is_packed_index_cache(cache_k: jax.Array) -> bool:
     return cache_k.shape[-1] == PAGE_RECORDS
 
 
-def packed_page_size(page_rows: int) -> int:
-    """Tokens per page of a packed FP8 index-key cache with ``page_rows`` rows.
-
-    A page is ``33 * page_size / 128`` rows of 128 words: 32 rows of four FP8
-    features per token, then a row of float32 scales.
-    """
-    page_size, rest = divmod(page_rows * PAGE_RECORDS, PAGE_ROWS)
-    if rest:
-        raise ValueError(f"{page_rows} rows is not a packed FP8 index-key page")
-    return page_size
-
-
 def store_packed_keys(
     cache_k: jax.Array,  # u8[num_pages, page_rows, 4, 128]
     key: jax.Array,  # float[max_num_tokens, 128]
@@ -149,21 +138,12 @@ def store_packed_keys(
     of word [r, t] is element [r, b, t]. The scales are this pool's UE8M0
     powers of two, so the values match the 256-byte records bit for bit.
     """
-    _, page_rows, _, lanes = cache_k.shape
     num_tokens, head_dim = key.shape
-    if lanes != PAGE_RECORDS or head_dim != PAGE_RECORDS:
-        raise ValueError(
-            f"packed index keys need 128 lanes and 128 channels, got {lanes=} "
-            f"and {head_dim=}"
-        )
-    page_size = packed_page_size(page_rows)
+    if head_dim != PAGE_RECORDS:
+        raise ValueError(f"packed index keys need 128 channels, got {head_dim=}")
+    page_size = PackedFP8Layout.of(cache_k).page_size
     k_fp8, k_scale, _ = quantize_fp8_ue8m0(key)
-    bits = jax.lax.bitcast_convert_type(k_fp8, jnp.uint8).astype(jnp.uint32)
-    bits = bits.reshape(num_tokens, PAGE_ROWS - 1, 4)
-    words = bits[..., 0] | (bits[..., 1] << 8) | (bits[..., 2] << 16)
-    words |= bits[..., 3] << 24
-    scale = jax.lax.bitcast_convert_type(k_scale, jnp.int32)
-    values = jnp.concatenate((words.astype(jnp.int32), scale), axis=1)
+    values = pack_fp8_words(k_fp8, k_scale)
 
     # Padding rows of the batch are not stored, as in _store_keys.
     active_cu_q_lens = jnp.minimum(cu_q_lens, cu_q_lens[distribution[2]])
@@ -171,11 +151,7 @@ def store_packed_keys(
         num_tokens, kv_lens, page_indices, active_cu_q_lens, page_size
     )
     # Padding rows land on the null page 0, which the writer skips.
-    bases = page * page_rows
-    (cache_k,) = write_packed_pages(
-        (cache_k,), bases, slot, values, page_size=page_size, interpret=interpret
-    )
-    return cache_k
+    return write_packed_pages(cache_k, page, slot, values, interpret=interpret)
 
 
 def _select_packed(
@@ -195,9 +171,8 @@ def _select_packed(
     past the batch's real requests select nothing. Positions are counted from
     the start of the row's sequence, -1 where nothing is selected.
     """
-    num_pages, page_rows, _, _ = cache_k.shape
     num_tokens = q_fp8.shape[0]
-    page_size = packed_page_size(page_rows)
+    page_size = PackedFP8Layout.of(cache_k).page_size
     num_seqs = kv_lens.shape[0]
     # Unused page-table entries hold the null page 0, which the scorer skips.
     page_table = page_indices.reshape(num_seqs, -1)
@@ -207,17 +182,15 @@ def _select_packed(
     )
     lengths = jnp.where(valid, pos + 1, 0).astype(jnp.int32)
     requests = jnp.where(valid, seq_id, -1).astype(jnp.int32)
-    layout_args = (num_pages, page_rows, 0, page_size)
     selected, _ = select_fp8_indexer_jax(
         q_fp8,
-        (cache_k,),
+        cache_k,
         page_table,
         weights,
         lengths,
         jnp.full((num_tokens, 1), -1, jnp.int32),
         requests,
         lengths.max().reshape(1),
-        layout_args,
         topk,
         8,
         False,
