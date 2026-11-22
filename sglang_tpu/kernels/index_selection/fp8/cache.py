@@ -179,7 +179,8 @@ def write_packed_pages(
     values = jnp.pad(values.T, ((0, 0), (0, -count % lanes)))
 
     def kernel(page_ref, column_ref, value_ref, _keys, _scales, *refs):
-        keys_ref, scales_ref, staged_keys, staged_scales, sem = refs
+        # A page's key rows and scale row share one 33-row staging slot.
+        keys_ref, scales_ref, staged, sem = refs
 
         def first(record):
             page = page_ref[record]
@@ -208,17 +209,22 @@ def write_packed_pages(
 
                 @pl.when(first(record))
                 def _():
+                    if wait:
+                        # Both copies count on one semaphore: wait once for
+                        # the slot's 33 rows.
+                        slot_rows = staged.at[slot]
+                        pltpu.make_async_copy(slot_rows, slot_rows, sem).wait()
+                        return
                     page = page_ref[record]
                     for hbm, vmem in (
-                        (keys_ref.at[page], staged_keys.at[slot]),
-                        (scales_ref.at[pl.ds(page, 1)], staged_scales.at[slot]),
+                        (keys_ref.at[page], staged.at[slot, pl.ds(0, KEY_ROWS)]),
+                        (
+                            scales_ref.at[pl.ds(page, 1)],
+                            staged.at[slot, pl.ds(KEY_ROWS, 1)],
+                        ),
                     ):
                         src, dst = (vmem, hbm) if write else (hbm, vmem)
-                        copy = pltpu.make_async_copy(src, dst, sem)
-                        if wait:
-                            copy.wait()
-                        else:
-                            copy.start()
+                        pltpu.make_async_copy(src, dst, sem).start()
 
                 return carry
 
@@ -243,12 +249,7 @@ def write_packed_pages(
                         jax.lax.broadcasted_iota(jnp.int32, (PAGE_ROWS, lanes), 1)
                         == column_ref[record]
                     )
-                    staged_keys[slot] = jnp.where(
-                        hit[:KEY_ROWS], word[:KEY_ROWS], staged_keys[slot]
-                    )
-                    staged_scales[slot] = jnp.where(
-                        hit[KEY_ROWS:], word[KEY_ROWS:], staged_scales[slot]
-                    )
+                    staged[slot] = jnp.where(hit, word, staged[slot])
                     return record + 1
 
                 jax.lax.while_loop(
@@ -274,8 +275,7 @@ def write_packed_pages(
             in_specs=(pl.BlockSpec(memory_space=pltpu.VMEM), hbm, hbm),
             out_specs=(hbm, hbm),
             scratch_shapes=(
-                pltpu.VMEM((batch, KEY_ROWS, lanes), jnp.int32),
-                pltpu.VMEM((batch, 1, lanes), jnp.int32),
+                pltpu.VMEM((batch, PAGE_ROWS, lanes), jnp.int32),
                 pltpu.SemaphoreType.DMA,
             ),
         ),
