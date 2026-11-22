@@ -27,10 +27,10 @@ import jax.numpy as jnp
 import torch
 
 from sglang_tpu.kernels.index_selection.fp8.cache import (
-    PAGE_RECORDS,
     quantize_index_rows,
     write_fp8_records,
 )
+from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_RECORDS
 from sglang_tpu.kernels.index_selection.selection import (
     prepare_fp8_candidates,
     select_fp8_indexer_jax,

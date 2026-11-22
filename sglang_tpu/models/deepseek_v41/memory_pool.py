@@ -39,9 +39,11 @@ from sglang.srt.mem_cache.memory_pool import get_tensor_size_bytes
 from sglang.srt.runtime_context import get_exec
 from sglang.srt.utils import ceil_div
 from sglang_tpu.dsv4.dsv4_memory_pool import _zeros_kv_buffer
-
-from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_RECORDS, PAGE_STRIDE
-
+from sglang_tpu.kernels.index_selection.fp8.pages import (
+    BYTES_PER_RECORD,
+    PAGE_RECORDS,
+    page_shape,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +57,7 @@ WORD_LANES = 128
 SWA_BYTES_PER_TOKEN = LATENT_DIM * torch.bfloat16.itemsize
 # One 512 B FP8 record (448 e4m3 + 64 e8m0) plus its fp32 scale companion.
 MAIN_BYTES_PER_RECORD = WORD_LANES * 4 + 4
-# 128 FP8 values + one fp32 scale: 33 word rows per 128-record page, padded to 40.
-INDEX_BYTES_PER_RECORD = PAGE_STRIDE * WORD_LANES * 4 // PAGE_RECORDS
+INDEX_BYTES_PER_RECORD = BYTES_PER_RECORD
 
 LOW_RATIOS = (1, 2)
 SUPPORTED_RATIOS = (0, *LOW_RATIOS)
@@ -204,7 +205,7 @@ class DSV41TPUIndexerPool(DeepSeekV4IndexerPool):
         )
 
     def _create_buffer(self) -> None:
-        shape = (self.pages, PAGE_STRIDE, WORD_LANES)
+        shape = page_shape(self.pages)
         self.index_k_with_scale_buffer = [
             _zeros_kv_buffer(shape, torch.int32, self.device)
             for _ in range(self.layer_num)

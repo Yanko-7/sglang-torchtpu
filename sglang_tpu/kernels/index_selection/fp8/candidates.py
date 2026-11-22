@@ -14,7 +14,8 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
-from .cache import PAGE_RECORDS, PAGE_ROWS, PAGE_STRIDE, PackedFP8Layout
+from .cache import PackedFP8Layout
+from .pages import PAGE_RECORDS, PAGE_ROWS, PAGE_STRIDE
 from .tuned import PAGED_MQA_GATHER_CONFIG
 
 

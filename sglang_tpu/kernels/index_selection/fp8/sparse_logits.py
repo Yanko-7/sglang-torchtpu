@@ -14,7 +14,6 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from .cache import PAGE_RECORDS, PAGE_ROWS
 from .common import (
     QueryTile,
     _dma_rows,
@@ -24,6 +23,7 @@ from .common import (
     _reduce_on_mxu,
     _weighted_selector,
 )
+from .pages import PAGE_RECORDS, PAGE_ROWS
 from .tuned import (
     PACKED_FP8_PREPARED_MQA_CONFIG,
     PACKED_FP8_PREPARED_PAIRS,

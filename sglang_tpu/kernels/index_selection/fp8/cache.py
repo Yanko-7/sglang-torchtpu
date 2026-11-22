@@ -12,13 +12,14 @@ written or read. Unwritten keys are masked by sequence lengths.
 """
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from .pages import KEY_ROWS, PAGE_RECORDS, PAGE_ROWS, PAGE_STRIDE
+from .pages import KEY_ROWS, PAGE_RECORDS, PAGE_ROWS, page_shape
 
 # Stage up to 128 touched pages, stopping at the sorted invalid-record tail.
 PACKED_FP8_WRITE_BATCH = 128
@@ -45,13 +46,13 @@ class PackedFP8Layout:
     """Pages of a packed FP8 cache; a page holds 128 keys."""
 
     pages: int
-    page_size = PAGE_RECORDS
+    page_size: ClassVar[int] = PAGE_RECORDS
     # Rows of a page's fields: the key rows, then the scales.
-    page_rows = PAGE_ROWS
+    page_rows: ClassVar[int] = PAGE_ROWS
 
     @property
     def shape(self) -> tuple[int, int, int]:
-        return self.pages, PAGE_STRIDE, PAGE_RECORDS
+        return page_shape(self.pages)
 
     @classmethod
     def of(cls, cache: jax.Array) -> "PackedFP8Layout":

@@ -32,11 +32,11 @@ from sglang_tpu.dsv4.streamindex_topk.streamindex_topk import (
     get_kv_cache_shape,
 )
 from sglang_tpu.kernels.index_selection.fp8.cache import (
-    PAGE_RECORDS,
     PackedFP8Layout,
     pack_fp8_words,
     write_packed_pages,
 )
+from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_RECORDS
 from sglang_tpu.kernels.index_selection.selection import (
     select_fp8_indexer_jax,
 )
@@ -322,7 +322,13 @@ def dsa_indexer_step(
         )
         weights = head_weights.astype(jnp.float32) * q_scale[..., 0] * weight_scale
         topk_indices = _select_packed(
-            q_fp8, weights, cache_k, kv_lens, page_indices, cu_q_lens, distribution,
+            q_fp8,
+            weights,
+            cache_k,
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
             topk=topk,
         )
         if row_count:

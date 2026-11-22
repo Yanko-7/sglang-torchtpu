@@ -34,7 +34,11 @@ from sglang.srt.mem_cache.memory_pool import (
     get_tensor_size_bytes,
 )
 from sglang_tpu.envs import envs as tpu_envs
-from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_RECORDS, PAGE_STRIDE
+from sglang_tpu.kernels.index_selection.fp8.pages import (
+    BYTES_PER_RECORD,
+    PAGE_RECORDS,
+    page_shape,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1386,7 +1390,7 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
         """Bytes one token takes across all layers' buffers, as allocated.
         A raw ring is sized by request slots, not tokens, so it is not counted."""
         if cls.packs_index_keys(page_size, index_head_dim, index_kpool):
-            index_bytes = PAGE_STRIDE * torch.int32.itemsize
+            index_bytes = BYTES_PER_RECORD
         else:
             index_bytes = cls.index_key_record_bytes(index_head_dim) // index_kpool
         if index_kpool > 1 and not raw_ring:
@@ -1416,11 +1420,7 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
         The DSV4.1 indexer kernels read 128-wide keys in 128-token pages. The pooled indexer and glm_flash_megakernel still read
         the records.
         """
-        return (
-            index_kpool == 1
-            and index_head_dim == 128
-            and page_size == PAGE_RECORDS
-        )
+        return index_kpool == 1 and index_head_dim == 128 and page_size == PAGE_RECORDS
 
     def _create_buffers(self):
         rows_per_page = self.page_size // self.TOKENS_PER_ROW
@@ -1440,11 +1440,7 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
             self.page_size, self._index_head_dim, self._index_kpool
         ):
             index_key_dtype = torch.int32
-            index_key_shape = (
-                self.num_pages,
-                PAGE_STRIDE,
-                PAGE_RECORDS,
-            )
+            index_key_shape = page_shape(self.num_pages)
         else:
             index_key_dtype = torch.uint8
             index_key_shape = (
