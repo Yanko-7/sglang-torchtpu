@@ -2,7 +2,7 @@
 # Source: tests/kernels/deepseek_v41/test_fp8_paged_mqa_logits.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Paged FP8 MQA logits across page sizes, padded widths and ragged lengths."""
+"""Paged FP8 MQA logits across padded widths and ragged lengths."""
 
 import os
 import sys
@@ -24,7 +24,8 @@ import numpy as np
 import pytest
 
 from sglang_tpu.kernels.index_selection.fp8.cache import (
-    PAGE_ROWS,
+    KEY_ROWS,
+    FP8Cache,
     PackedFP8Layout,
     quantize_index_rows,
 )
@@ -37,35 +38,24 @@ from sglang_tpu.kernels.index_selection.selection import (
 
 
 def _pack(keys, layout):
-    """Feature-major pages: field f of record r at row-word f * page_size + r.
-
-    Returns the uint8 [pages, page_rows, 4, 128] cache: byte b of word [r, t]
-    at [r, b, t].
-    """
+    """The cache holding record r = keys[r]: word w of record r at
+    keys[r // 128, w, r % 128], its scale's FP32 bits at scales[r // 128, r % 128]."""
     values, scales, _ = quantize_index_rows(keys)
     bits = np.asarray(jax.lax.bitcast_convert_type(values, jnp.uint8))
-    bits = bits.astype(np.uint32).reshape(-1, 32, 4)
+    bits = bits.astype(np.uint32).reshape(-1, KEY_ROWS, 4)
     words = bits[..., 0] | bits[..., 1] << 8 | bits[..., 2] << 16 | bits[..., 3] << 24
-    fields = np.concatenate(
-        (words.view(np.int32), np.asarray(scales).view(np.int32)[:, None]), axis=1
+    pages, size = layout.pages, layout.page_size
+    words = words.view(np.int32).reshape(pages, size, KEY_ROWS).swapaxes(1, 2)
+    cache = FP8Cache(
+        jnp.asarray(np.ascontiguousarray(words)),
+        jnp.asarray(np.asarray(scales, np.float32).view(np.int32).reshape(pages, size)),
     )
-    size, records = layout.page_size, np.arange(len(keys))
-    words_at = (records // size * layout.page_rows * 128)[:, None]
-    words_at = (
-        words_at + np.arange(PAGE_ROWS)[None, :] * size + (records % size)[:, None]
-    )
-    pool = np.zeros(layout.pages * layout.page_rows * 128, np.int32)
-    pool[words_at] = fields
-    cache = pool.view(np.uint8).reshape(layout.pages, layout.page_rows, 128, 4)
     dequantized = values.astype(jnp.float32) * scales[:, None]
-    return np.ascontiguousarray(cache.swapaxes(2, 3)), dequantized
+    return cache, dequantized
 
 
-@pytest.mark.parametrize(
-    "page_size,max_model_len",
-    [(128, 8192), (128, 50000), (128, 98816), (256, 8192), (256, 98816)],
-)
-def test_paged_mqa_logits_matches_reference(page_size, max_model_len):
+@pytest.mark.parametrize("max_model_len", [8192, 50000, 98816])
+def test_paged_mqa_logits_matches_reference(max_model_len):
     if jax.default_backend() != "tpu":
         pytest.skip("Packed FP8 scoring requires TPU")
     rng = np.random.default_rng(7)
@@ -74,9 +64,10 @@ def test_paged_mqa_logits_matches_reference(page_size, max_model_len):
     bases = np.array([max_model_len - 5, 0, max_model_len // 2 - 3])
     lengths = np.concatenate([b + np.arange(c) for b, c in zip(bases, counts)])
     owners = np.repeat(np.arange(len(counts)), counts)
+    page_size = PackedFP8Layout.page_size
     per_request = -(-max_model_len // page_size)
     # Page 0 is the null page; requests own pages 1 and up.
-    layout = PackedFP8Layout(1 + len(counts) * per_request, page_size=page_size)
+    layout = PackedFP8Layout(1 + len(counts) * per_request)
     table = 1 + rng.permutation(layout.pages - 1).reshape(len(counts), per_request)
     table[2, 1] = 0
     keys = jnp.asarray(rng.normal(size=(layout.pages * page_size, 128)), jnp.bfloat16)
@@ -87,7 +78,7 @@ def test_paged_mqa_logits_matches_reference(page_size, max_model_len):
 
     result = fp8_paged_mqa_logits(
         q,
-        jnp.asarray(pool),
+        pool,
         weights,
         jnp.asarray(lengths, jnp.int32),
         jnp.asarray(table, jnp.int32),
@@ -127,14 +118,13 @@ def test_paged_mqa_logits_matches_reference(page_size, max_model_len):
 def test_unsorted_requests_select_own_pages():
     if jax.default_backend() != "tpu":
         pytest.skip("Packed FP8 selection requires TPU")
-    tokens, width, topk, page_size, groups = 288, 16384, 512, 256, 48
+    tokens, width, topk, page_size, groups = 288, 16384, 512, 128, 48
     rng = np.random.default_rng(13)
     requests = rng.permutation(np.repeat(np.arange(groups), tokens // groups))
     lengths = rng.integers(topk + 1, width + 1, tokens).astype(np.int32)
-    layout = PackedFP8Layout(512, page_size=page_size)
+    layout = PackedFP8Layout(512)
     keys = jnp.asarray(rng.normal(size=(layout.pages * page_size, 128)), jnp.bfloat16)
     pool, _ = _pack(keys, layout)
-    pool = jnp.asarray(pool)
     table = rng.integers(1, layout.pages, (groups, width // page_size)).astype(np.int32)
     q = jnp.asarray(rng.normal(size=(tokens, 32, 128)), jnp.float8_e4m3fn)
     weights = jnp.asarray(rng.uniform(0.01, 0.1, (tokens, 32)), jnp.float32)

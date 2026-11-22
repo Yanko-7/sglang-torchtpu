@@ -14,7 +14,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
-from .cache import PAGE_RECORDS, PAGE_ROWS, PackedFP8Layout, cache_words
+from .cache import KEY_ROWS, PAGE_RECORDS, PAGE_ROWS, FP8Cache, PackedFP8Layout
 from .tuned import PAGED_MQA_GATHER_CONFIG
 
 
@@ -42,7 +42,7 @@ class CandidateMetadata(NamedTuple):
 
 
 def prepare_candidates(
-    cache: jax.Array,
+    cache: FP8Cache,
     pages: jax.Array,
     candidates: jax.Array,
     requests_ids: jax.Array,
@@ -52,7 +52,8 @@ def prepare_candidates(
     """Gather packed FP8 K for candidate unions shared by query groups.
 
     Args:
-        cache: Packed FP8 cache, uint8 [pages, page_rows, 4, 128].
+        cache: Packed FP8 cache: int32 keys [pages, 32, 128] and scales
+            [pages, 128] of FP32 bits.
         pages: Dense [requests, max_pages_per_request] physical page table;
             valid page counts vary by request, bounded by sequence lengths.
         candidates: [queries, candidate_count] logical block IDs; -1 is padding.
@@ -771,7 +772,7 @@ def resolve_candidate_blocks(
 
 
 def gather_candidate_keys(
-    cache: jax.Array,
+    cache: FP8Cache,
     physical_block_ids: jax.Array,
     offsets: jax.Array,
     *,
@@ -780,7 +781,8 @@ def gather_candidate_keys(
     """Gather compact pages, skipping empty tiles inside SparseCore.
 
     Args:
-        cache: Packed FP8 cache, uint8 [pages, page_rows, 4, 128].
+        cache: Packed FP8 cache: int32 keys [pages, 32, 128] and scales
+            [pages, 128] of FP32 bits.
         physical_block_ids: [groups, blocks] cache block IDs; -1 is padding.
         offsets: Query boundaries identifying live group rows.
         block: Tokens per physical block, at most the cache's page size.
@@ -792,18 +794,20 @@ def gather_candidate_keys(
     layout = PackedFP8Layout.of(cache)
     info = plsc.get_sparse_core_info()
     lanes, units = info.num_lanes, info.num_cores * info.num_subcores
+    sources = 2  # the key rows and the scales
     group = max(lanes, min(128, 1024 // block))
     buffers = min(
-        2, info.vmem_capacity_bytes // (group * PAGE_ROWS * (block + 1) * 4 + 4096)
+        2,
+        info.vmem_capacity_bytes
+        // (group * PAGE_ROWS * (block + sources) * 4 + 4096),
     )
     group, buffers = PAGED_MQA_GATHER_CONFIG.get(block, (group, buffers))
     count = physical_block_ids.size
     per_page = PAGE_RECORDS // block
-    source_per_page = layout.page_size // block
     span = group * PAGE_ROWS
     per_unit = pl.cdiv(count, units * group) * group
     steps = per_unit // group
-    scratch_words = buffers * (span * (block + 1) + lanes) + lanes
+    scratch_words = buffers * (span * (block + sources) + lanes) + lanes
     metadata_rows = min(
         pl.cdiv(per_unit, group * lanes) * group * lanes,
         (info.vmem_capacity_bytes // 4 - scratch_words - 4096)
@@ -842,9 +846,9 @@ def gather_candidate_keys(
             pltpu.VMEM((lanes,), jnp.int32),
             pltpu.VMEM((buffers, lanes), jnp.int32),
             pltpu.VMEM((buffers, span, block), jnp.int32),
-            pltpu.VMEM((buffers, span), jnp.int32),
+            pltpu.VMEM((buffers, sources, span), jnp.int32),
             pltpu.SemaphoreType.DMA,
-            pltpu.SemaphoreType.DMA((buffers,)),
+            pltpu.SemaphoreType.DMA((buffers, sources)),
             pltpu.SemaphoreType.DMA((buffers,)),
         ),
         compiler_params=pltpu.CompilerParams(
@@ -907,21 +911,29 @@ def gather_candidate_keys(
                 any_valid = jnp.zeros((lanes,), jnp.bool_)
 
                 def address(chosen):
+                    # Key-row and scale block ids of field 0; key fields step by
+                    # per_page blocks.
                     safe = jnp.maximum(chosen, 0)
-                    page = safe // source_per_page
-                    source = page * layout.page_rows * per_page + safe % source_per_page
-                    return source, (chosen >= 0) & (page < layout.pages)
+                    page, column = safe // per_page, safe % per_page
+                    keys = page * KEY_ROWS * per_page + column
+                    scales = page * per_page + column
+                    return keys, scales, (chosen >= 0) & (page < layout.pages)
 
                 if per_page == lanes:
                     for i in range(0, group, lanes):
                         # JAX 0.10.2 Mosaic cannot flatten a 2D VMEM ref; index rows.
                         chosen = selected[index, pl.ds(i, lanes)]
                         any_valid = any_valid | (chosen >= 0)
-                        base, valid = address(chosen)
+                        keys, scales, valid = address(chosen)
+                        none = jnp.full((lanes,), -1, jnp.int32)
                         for field in range(PAGE_ROWS):
-                            read_ids[
-                                slot, pl.ds(i * PAGE_ROWS + field * lanes, lanes)
-                            ] = jnp.where(valid, base + field * source_per_page, -1)
+                            at = pl.ds(i * PAGE_ROWS + field * lanes, lanes)
+                            key = keys + field * per_page
+                            ids = (key, none) if field < KEY_ROWS else (none, scales)
+                            for source, block_ids in enumerate(ids):
+                                read_ids[slot, source, at] = jnp.where(
+                                    valid, block_ids, -1
+                                )
                 else:
                     for i in range(0, group, lanes):
                         any_valid |= selected[index, pl.ds(i, lanes)] >= 0
@@ -938,9 +950,13 @@ def gather_candidate_keys(
                         chosen = plsc.load_gather(
                             selected, [jnp.full((lanes,), index, jnp.int32), column]
                         )
-                        source, valid = address(chosen)
-                        read_ids[slot, pl.ds(i, lanes)] = jnp.where(
-                            valid, source + field * source_per_page, -1
+                        keys, scales, valid = address(chosen)
+                        key = field < KEY_ROWS
+                        read_ids[slot, 0, pl.ds(i, lanes)] = jnp.where(
+                            valid & key, keys + field * per_page, -1
+                        )
+                        read_ids[slot, 1, pl.ds(i, lanes)] = jnp.where(
+                            valid & ~key, scales, -1
                         )
 
                 flags[slot, :] = (
@@ -949,14 +965,15 @@ def gather_candidate_keys(
 
             @pl.when(live(step))
             def transfer():
-                copy = pltpu.make_async_copy(
-                    pool.reshape(-1, block).at[
-                        plsc.Indices(read_ids.at[slot], ignored_value=-1)
-                    ],
-                    words.at[slot],
-                    read_sem.at[slot],
-                )
-                (copy.wait if wait else copy.start)()
+                for source, ref in enumerate(pool):
+                    copy = pltpu.make_async_copy(
+                        ref.reshape(-1, block).at[
+                            plsc.Indices(read_ids.at[slot, source], ignored_value=-1)
+                        ],
+                        words.at[slot],
+                        read_sem.at[slot, source],
+                    )
+                    (copy.wait if wait else copy.start)()
 
         def write(step, wait=False):
             slot = step % buffers
@@ -994,4 +1011,6 @@ def gather_candidate_keys(
                 lambda last=last: write(active - last - 1, wait=True)
             )
 
-    return kernel(cache_words(cache), ids, control)[: count // per_page * PAGE_ROWS]
+    # Both as int32 rows of 128 words; merging the key rows into pages is a view.
+    pools = (cache.keys.reshape(-1, PAGE_RECORDS), cache.scales)
+    return kernel(pools, ids, control)[: count // per_page * PAGE_ROWS]

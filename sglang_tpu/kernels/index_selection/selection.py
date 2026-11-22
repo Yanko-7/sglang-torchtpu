@@ -29,7 +29,7 @@ from sglang_tpu.kernels.index_selection import (
     publication,
     streaming_topk,
 )
-from sglang_tpu.kernels.index_selection.fp8.cache import PackedFP8Layout
+from sglang_tpu.kernels.index_selection.fp8.cache import FP8Cache, PackedFP8Layout
 from sglang_tpu.kernels.index_selection.fp8.candidates import (
     PreparedCandidates,
     prepare_candidates,
@@ -562,7 +562,7 @@ def _query_start_loc(requests: jax.Array, num_requests: int) -> jax.Array:
 
 def _select_fp8_indexer_jax(
     q: jax.Array,
-    cache: jax.Array,
+    cache: FP8Cache,
     page_table: jax.Array,
     weights: jax.Array,
     lengths: jax.Array,
@@ -861,7 +861,7 @@ def _select_fp8_indexer_jax(
 
 def select_fp8_indexer_jax(
     q: jax.Array,
-    cache: jax.Array,
+    cache: FP8Cache,
     page_table: jax.Array,
     weights: jax.Array,
     lengths: jax.Array,
@@ -948,7 +948,7 @@ def select_fp8_indexer_jax(
 
 
 def prepare_fp8_candidates(
-    cache: jax.Array,
+    cache: FP8Cache,
     page_table: jax.Array,
     candidates: jax.Array,
     requests: jax.Array,

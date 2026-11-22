@@ -80,7 +80,8 @@ def topk_reconstruction_threshold(k: int) -> int:
     return min(8192, 4 * k)
 
 
-# Rolling SparseCore gather: three buffers overlap reads and writes for 8-token blocks.
-# 64 pages per tile divides tokens * 2 * 2048 candidate blocks over 32 subcores, so the
-# gather output needs no trailing slice; 96 left a sliced 8.25 GiB copy at 2048 tokens.
-PAGED_MQA_GATHER_CONFIG = {8: (64, 3)}
+# Rolling SparseCore gather of 8-token blocks from the key rows and the scales:
+# four buffers overlap reads and writes (tuned for two sources). 64 pages per tile
+# divides tokens * 2 * 2048 candidate blocks over 32 subcores, so the gather output
+# needs no trailing slice; 96 left a sliced 8.25 GiB copy at 2048 tokens.
+PAGED_MQA_GATHER_CONFIG = {8: (64, 4)}
