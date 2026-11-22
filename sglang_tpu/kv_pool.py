@@ -1277,11 +1277,10 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
 
     Each layer that runs its own DSA indexer also gets an index-key buffer. It
     uses the same page table. A layer that reuses the previous layer's top-k
-    result has no index-key buffer. Without a pooled indexer and with pages of
-    whole 128-token rows, it holds the DSV4.1 indexer's packed FP8 pages,
-    ``[num_pages, 33 * page_size // 128, 4, 128]``: 132 bytes per token, byte b
-    of word [r, t] at [r, b, t]. Otherwise it holds 256-byte records, ``[num_pages,
-    page_size // 4, 4, 256]``. With a pooled indexer (``index_kpool > 1``,
+    result has no index-key buffer. Without a pooled indexer and on 128-token
+    pages, it holds the DSV4.1 indexer's packed FP8 pages, int32 ``[num_pages,
+    40, 128]``: 33 rows of data padded to whole 8-row tiles, 160 bytes per token.
+    Otherwise it holds 256-byte records, ``[num_pages, page_size // 4, 4, 256]``. With a pooled indexer (``index_kpool > 1``,
     GLM-5.3-Flash) the index-key buffer holds one record per pool, in the page of
     the pool's tokens (``page_size // index_kpool`` records per page), so a
     request never writes a page another request shares through the radix tree.
