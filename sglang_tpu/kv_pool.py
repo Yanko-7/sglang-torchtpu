@@ -34,6 +34,7 @@ from sglang.srt.mem_cache.memory_pool import (
     get_tensor_size_bytes,
 )
 from sglang_tpu.envs import envs as tpu_envs
+from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_RECORDS, PAGE_STRIDE
 
 logger = logging.getLogger(__name__)
 
@@ -1296,11 +1297,6 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
     LANE_BYTES = 128
     # The RoPE and index-key buffers store this many tokens per row of a page.
     TOKENS_PER_ROW = 4
-    # Packed FP8 index keys: int32 pages of 128 tokens. A row holds one word of
-    # each token; a token takes 32 words of four FP8 features plus one float32
-    # scale, and the page's 33 rows are padded to 40 (whole 8-row tiles).
-    PACKED_INDEX_TOKENS_PER_ROW = 128
-    PACKED_INDEX_ROWS = 40
 
     def __init__(
         self,
@@ -1390,7 +1386,7 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
         """Bytes one token takes across all layers' buffers, as allocated.
         A raw ring is sized by request slots, not tokens, so it is not counted."""
         if cls.packs_index_keys(page_size, index_head_dim, index_kpool):
-            index_bytes = cls.PACKED_INDEX_ROWS * torch.int32.itemsize
+            index_bytes = PAGE_STRIDE * torch.int32.itemsize
         else:
             index_bytes = cls.index_key_record_bytes(index_head_dim) // index_kpool
         if index_kpool > 1 and not raw_ring:
@@ -1423,7 +1419,7 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
         return (
             index_kpool == 1
             and index_head_dim == 128
-            and page_size == cls.PACKED_INDEX_TOKENS_PER_ROW
+            and page_size == PAGE_RECORDS
         )
 
     def _create_buffers(self):
@@ -1446,8 +1442,8 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
             index_key_dtype = torch.int32
             index_key_shape = (
                 self.num_pages,
-                self.PACKED_INDEX_ROWS,
-                self.PACKED_INDEX_TOKENS_PER_ROW,
+                PAGE_STRIDE,
+                PAGE_RECORDS,
             )
         else:
             index_key_dtype = torch.uint8

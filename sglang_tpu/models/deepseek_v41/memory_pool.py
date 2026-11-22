@@ -40,14 +40,7 @@ from sglang.srt.runtime_context import get_exec
 from sglang.srt.utils import ceil_div
 from sglang_tpu.dsv4.dsv4_memory_pool import _zeros_kv_buffer
 
-try:
-    from sglang_tpu.kernels.index_selection.fp8.cache import PAGE_RECORDS, PAGE_STRIDE
-except ModuleNotFoundError as exc:
-    if exc.name != "jax" and not (exc.name or "").startswith("jax."):
-        raise
-    # Without JAX (CPU unit tests), the same packed FP8 page constants.
-    PAGE_RECORDS = 128
-    PAGE_STRIDE = 40
+from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_RECORDS, PAGE_STRIDE
 
 
 logger = logging.getLogger(__name__)

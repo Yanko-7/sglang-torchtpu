@@ -18,12 +18,7 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-PAGE_RECORDS = 128
-# A key's fields: 32 words of four FP8 features, then its FP32 scale.
-KEY_ROWS = 32
-PAGE_ROWS = KEY_ROWS + 1
-# Rows a page occupies: the fields padded to whole 8-row int32 tiles.
-PAGE_STRIDE = 40
+from .pages import KEY_ROWS, PAGE_RECORDS, PAGE_ROWS, PAGE_STRIDE
 
 # Stage up to 128 touched pages, stopping at the sorted invalid-record tail.
 PACKED_FP8_WRITE_BATCH = 128
