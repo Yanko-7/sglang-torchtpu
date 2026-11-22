@@ -6,8 +6,8 @@ Single bank, one device per process (no mesh). Each op is a
 ``sglang_tpu.kernels.index_selection``. ``write_index_k`` donates
 the cache and returns its new value; the caller does ``index_k.copy_(result)``.
 
-Layout (``memory_pool.DSV41TPUTokenToKVPool.get_index_k``): uint8
-``[P, 33, 4, 128]``, 128 records a page. Record ``full_loc // r``
+Layout (``memory_pool.DSV41TPUTokenToKVPool.get_index_k``): int32
+``[P, 40, 128]``, 128 records a page. Record ``full_loc // r``
 lives on indexer page ``record // 128``; the per-request indexer page table is
 ``expand_index_page_table`` of the full page table for ratio 1 (full page p ->
 indexer pages 2p, 2p + 1) and the full page table itself for ratio 2.

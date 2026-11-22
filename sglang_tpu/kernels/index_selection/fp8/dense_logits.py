@@ -14,7 +14,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from .cache import PAGE_RECORDS, PAGE_ROWS, PackedFP8Layout, cache_words_ref
+from .cache import PAGE_RECORDS, PAGE_ROWS, PackedFP8Layout
 from .common import (
     QueryTile,
     _dma_rows,
@@ -32,11 +32,11 @@ _ISSUE_DEPTH = 8
 
 
 def _encode_page_table(page_ids, layout):
-    """Records hold the page's first word row << 1 and a valid bit."""
+    """Records hold the page id << 1 and a valid bit."""
     valid = (page_ids > 0) & (page_ids < layout.pages)
     # Spread masked reads: repeating page zero serializes a partially filled tile.
     safe = jnp.where(valid, page_ids, jnp.arange(page_ids.shape[-1]) % layout.pages)
-    return (safe * layout.page_rows << 1) | valid.astype(jnp.int32)
+    return (safe << 1) | valid.astype(jnp.int32)
 
 
 def _pick(future, ends, values):
@@ -55,8 +55,7 @@ class _DenseKernel:
         self.offsets, self.lengths, query_start = smem
         self.config, self.layout, self.reuse_keys = config, layout, reuse_keys
         self.mxu_size, self.sublanes = info.mxu_column_size, info.num_sublanes
-        self.q, weights, cache, self.table = inputs
-        self.pool = cache_words_ref(cache)
+        self.q, weights, self.pool, self.table = inputs
         buffers, semaphores = scratch
         self.queries, keys, self.scores, self.counts, self.pages, self.padding = (
             buffers[:6]
@@ -112,10 +111,11 @@ class _DenseKernel:
 
     def load_page(self, i, page_slot, slot):
         record = self.page_record(i, page_slot)
-        address = lax.shift_right_logical(record, jnp.int32(1))
+        page = lax.shift_right_logical(record, jnp.int32(1))
         rows = self.layout.page_rows
+        # The page's 33 field rows; its padding rows stay in HBM.
         pltpu.make_async_copy(
-            self.pool.at[pl.ds(address, rows)],
+            self.pool.at[page, pl.ds(0, rows)],
             self.keys.at[slot, pl.ds(i * rows, rows)],
             self.read_sem.at[slot],
         ).start()
@@ -430,7 +430,7 @@ def fp8_paged_mqa_logits(
 
     Args:
         q: FP8 E4M3FN [T,32,128], in request order.
-        kv_cache: Packed FP8 cache, uint8 [pages,page_rows,4,128].
+        kv_cache: Packed FP8 cache, int32 [pages,40,128].
         weights: FP32 [T,32]; weighted BF16 products must be finite.
         context_lens: Int32 [T] visible index-key counts, zero for padding.
         block_table: Int32 [G,P] page IDs covering the requested output width;
@@ -447,10 +447,6 @@ def fp8_paged_mqa_logits(
     tokens, heads, dim = q.shape
     tokens = tokens if query_count is None else query_count
     layout = PackedFP8Layout.of(kv_cache)
-    if layout.page_size % PAGE_RECORDS:
-        raise ValueError(
-            f"Dense FP8 scoring requires pages of whole {PAGE_RECORDS}-record parts"
-        )
     tile, config = paged_mqa_query_tile(query_size, heads), PACKED_FP8_MQA_CONFIG
     key_tile = paged_mqa_key_tile(max_model_len, layout.page_size, config.key_tile)
     config = replace(

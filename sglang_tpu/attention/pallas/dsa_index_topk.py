@@ -116,13 +116,13 @@ def _store_keys(
 def is_packed_index_cache(cache_k: jax.Array) -> bool:
     """Whether ``cache_k`` holds packed FP8 pages rather than 256-byte records.
 
-    A record row is at least 256 bytes wide; a packed page row is 128 tokens.
+    Packed pages are int32 [num_pages, 40, 128]; records are uint8.
     """
-    return cache_k.shape[-1] == PAGE_RECORDS
+    return cache_k.dtype == jnp.int32
 
 
 def store_packed_keys(
-    cache_k: jax.Array,  # u8[num_pages, page_rows, 4, 128]
+    cache_k: jax.Array,  # int32[num_pages, 40, 128]
     key: jax.Array,  # float[max_num_tokens, 128]
     kv_lens: jax.Array,
     page_indices: jax.Array,
@@ -133,10 +133,10 @@ def store_packed_keys(
 ) -> jax.Array:
     """Quantize this step's keys and write them into packed FP8 index-key pages.
 
-    A page holds 128-token rows: 32 rows of four FP8 features per word, then a
-    row of float32 scales (the DSV4.1 indexer's ``fp8.cache`` format); byte b
-    of word [r, t] is element [r, b, t]. The scales are this pool's UE8M0
-    powers of two, so the values match the 256-byte records bit for bit.
+    A page holds 128 tokens: 32 rows of words of four FP8 features, a row of
+    float32 scale bits, and padding to 40 rows (the DSV4.1 indexer's
+    ``fp8.cache`` format). The scales are this pool's UE8M0 powers of two, so
+    the values match the 256-byte records bit for bit.
     """
     num_tokens, head_dim = key.shape
     if head_dim != PAGE_RECORDS:
@@ -157,7 +157,7 @@ def store_packed_keys(
 def _select_packed(
     q_fp8: jax.Array,  # fp8[max_num_tokens, 32, 128]
     weights: jax.Array,  # f32[max_num_tokens, 32]; query scale folded in
-    cache_k: jax.Array,  # u8[num_pages, page_rows, 4, 128]
+    cache_k: jax.Array,  # int32[num_pages, 40, 128]
     kv_lens: jax.Array,
     page_indices: jax.Array,
     cu_q_lens: jax.Array,

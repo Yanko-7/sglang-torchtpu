@@ -112,13 +112,13 @@ class TestZerosKvBuffer(CustomTestCase):
             index_key_layers=[True, False, True],
         )
         # The DSV4.1 indexer's packed FP8 pages: 33 rows of 128 words per 128
-        # tokens, byte b of word [r, t] at [r, b, t], so 132 bytes per token.
+        # tokens, padded to 40 rows, so 160 bytes per token.
         for layer_id in (0, 2):
             buf = pool.get_index_key_cache(layer_id)
-            self.assertEqual(tuple(buf.shape), (pool.num_pages, 33, 4, 128))
-            self.assertEqual(buf.dtype, torch.uint8)
+            self.assertEqual(tuple(buf.shape), (pool.num_pages, 40, 128))
+            self.assertEqual(buf.dtype, torch.int32)
             self.assertIsNone(buf._base)
-            self.assertEqual(buf.nbytes, pool.num_pages * pool.page_size * 132)
+            self.assertEqual(buf.nbytes, pool.num_pages * pool.page_size * 160)
 
     def test_split_pool_bytes_per_token_is_what_it_allocates(self):
         # The KV budget divides free memory by bytes_per_token, so it must count

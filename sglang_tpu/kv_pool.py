@@ -1296,10 +1296,11 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
     LANE_BYTES = 128
     # The RoPE and index-key buffers store this many tokens per row of a page.
     TOKENS_PER_ROW = 4
-    # Packed FP8 index keys: a row holds one 32-bit word of 128 tokens, and a
-    # token takes 32 words of four FP8 features plus one float32 scale.
+    # Packed FP8 index keys: int32 pages of 128 tokens. A row holds one word of
+    # each token; a token takes 32 words of four FP8 features plus one float32
+    # scale, and the page's 33 rows are padded to 40 (whole 8-row tiles).
     PACKED_INDEX_TOKENS_PER_ROW = 128
-    PACKED_INDEX_WORDS = 33
+    PACKED_INDEX_ROWS = 40
 
     def __init__(
         self,
@@ -1389,7 +1390,7 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
         """Bytes one token takes across all layers' buffers, as allocated.
         A raw ring is sized by request slots, not tokens, so it is not counted."""
         if cls.packs_index_keys(page_size, index_head_dim, index_kpool):
-            index_bytes = cls.PACKED_INDEX_WORDS * torch.int32.itemsize
+            index_bytes = cls.PACKED_INDEX_ROWS * torch.int32.itemsize
         else:
             index_bytes = cls.index_key_record_bytes(index_head_dim) // index_kpool
         if index_kpool > 1 and not raw_ring:
@@ -1416,16 +1417,13 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
     ) -> bool:
         """Whether the index keys use packed FP8 pages rather than records.
 
-        The DSV4.1 indexer kernels read 128-wide keys in pages of whole
-        128-token rows. The pooled indexer and glm_flash_megakernel still read
+        The DSV4.1 indexer kernels read 128-wide keys in 128-token pages. The pooled indexer and glm_flash_megakernel still read
         the records.
         """
         return (
             index_kpool == 1
             and index_head_dim == 128
-            # The kernels read pages of a power of two of whole 128-token rows.
-            and page_size % cls.PACKED_INDEX_TOKENS_PER_ROW == 0
-            and page_size & (page_size - 1) == 0
+            and page_size == cls.PACKED_INDEX_TOKENS_PER_ROW
         )
 
     def _create_buffers(self):
@@ -1445,14 +1443,14 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
         if self.packs_index_keys(
             self.page_size, self._index_head_dim, self._index_kpool
         ):
-            lanes = self.PACKED_INDEX_TOKENS_PER_ROW
+            index_key_dtype = torch.int32
             index_key_shape = (
                 self.num_pages,
-                self.PACKED_INDEX_WORDS * self.page_size // lanes,
-                torch.int32.itemsize,
-                lanes,
+                self.PACKED_INDEX_ROWS,
+                self.PACKED_INDEX_TOKENS_PER_ROW,
             )
         else:
+            index_key_dtype = torch.uint8
             index_key_shape = (
                 self.num_pages,
                 rows_per_page // self._index_kpool,
@@ -1480,7 +1478,7 @@ class TpuSplitMLATokenToKVPool(MLATokenToKVPool):
         ]
         self.index_key_buffer = [
             (
-                _zeros_kv_buffer(index_key_shape, torch.uint8, self.device)
+                _zeros_kv_buffer(index_key_shape, index_key_dtype, self.device)
                 if has_indexer
                 else None
             )

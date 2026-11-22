@@ -14,7 +14,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
-from .cache import PAGE_RECORDS, PAGE_ROWS, PackedFP8Layout, cache_words
+from .cache import PAGE_RECORDS, PAGE_ROWS, PAGE_STRIDE, PackedFP8Layout
 from .tuned import PAGED_MQA_GATHER_CONFIG
 
 
@@ -52,7 +52,7 @@ def prepare_candidates(
     """Gather packed FP8 K for candidate unions shared by query groups.
 
     Args:
-        cache: Packed FP8 cache, uint8 [pages, page_rows, 4, 128].
+        cache: Packed FP8 cache, int32 [pages, 40, 128].
         pages: Dense [requests, max_pages_per_request] physical page table;
             valid page counts vary by request, bounded by sequence lengths.
         candidates: [queries, candidate_count] logical block IDs; -1 is padding.
@@ -780,7 +780,7 @@ def gather_candidate_keys(
     """Gather compact pages, skipping empty tiles inside SparseCore.
 
     Args:
-        cache: Packed FP8 cache, uint8 [pages, page_rows, 4, 128].
+        cache: Packed FP8 cache, int32 [pages, 40, 128].
         physical_block_ids: [groups, blocks] cache block IDs; -1 is padding.
         offsets: Query boundaries identifying live group rows.
         block: Tokens per physical block, at most the cache's page size.
@@ -799,7 +799,6 @@ def gather_candidate_keys(
     group, buffers = PAGED_MQA_GATHER_CONFIG.get(block, (group, buffers))
     count = physical_block_ids.size
     per_page = PAGE_RECORDS // block
-    source_per_page = layout.page_size // block
     span = group * PAGE_ROWS
     per_unit = pl.cdiv(count, units * group) * group
     steps = per_unit // group
@@ -908,8 +907,8 @@ def gather_candidate_keys(
 
                 def address(chosen):
                     safe = jnp.maximum(chosen, 0)
-                    page = safe // source_per_page
-                    source = page * layout.page_rows * per_page + safe % source_per_page
+                    page = safe // per_page
+                    source = page * PAGE_STRIDE * per_page + safe % per_page
                     return source, (chosen >= 0) & (page < layout.pages)
 
                 if per_page == lanes:
@@ -921,7 +920,7 @@ def gather_candidate_keys(
                         for field in range(PAGE_ROWS):
                             read_ids[
                                 slot, pl.ds(i * PAGE_ROWS + field * lanes, lanes)
-                            ] = jnp.where(valid, base + field * source_per_page, -1)
+                            ] = jnp.where(valid, base + field * per_page, -1)
                 else:
                     for i in range(0, group, lanes):
                         any_valid |= selected[index, pl.ds(i, lanes)] >= 0
@@ -940,7 +939,7 @@ def gather_candidate_keys(
                         )
                         source, valid = address(chosen)
                         read_ids[slot, pl.ds(i, lanes)] = jnp.where(
-                            valid, source + field * source_per_page, -1
+                            valid, source + field * per_page, -1
                         )
 
                 flags[slot, :] = (
@@ -994,4 +993,6 @@ def gather_candidate_keys(
                 lambda last=last: write(active - last - 1, wait=True)
             )
 
-    return kernel(cache_words(cache), ids, control)[: count // per_page * PAGE_ROWS]
+    # Pages of whole 8-row tiles: viewing the cache as rows is free.
+    rows = cache.reshape(-1, PAGE_RECORDS)
+    return kernel(rows, ids, control)[: count // per_page * PAGE_ROWS]

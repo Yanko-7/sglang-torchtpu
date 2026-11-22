@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 from sglang_tpu.kernels.index_selection.fp8.cache import (
+    PAGE_ROWS,
     PackedFP8Layout,
     quantize_index_rows,
     read_fp8_records,
@@ -35,14 +36,6 @@ from sglang_tpu.kernels.index_selection.selection import (
 )
 
 
-def _cache_of_words(words, layout):
-    """The uint8 [pages, page_rows, 4, 128] cache of int32 words [rows, 128]:
-    byte b of word [r, t] at [r, b, t]."""
-    cache = np.ascontiguousarray(words, np.int32).view(np.uint8)
-    cache = cache.reshape(layout.pages, layout.page_rows, 128, 4)
-    return jnp.asarray(np.ascontiguousarray(cache.swapaxes(2, 3)))
-
-
 def _sorted_ids(ids):
     """Valid IDs ascending with -1 at the tail, for unordered comparisons."""
     limit = np.iinfo(np.int32).max
@@ -55,11 +48,11 @@ def _candidate_fixture(counts, short, seed=371):
     width, page_size, block, count, padding = 4096, 128, 8, 128, 3
     groups = len(counts)
     # Page 0 is the null page; requests own pages 1 and up.
-    layout = PackedFP8Layout(1 + groups * width // page_size, page_size=page_size)
+    layout = PackedFP8Layout(1 + groups * width // page_size)
     keys = jnp.asarray(rng.normal(size=(layout.pages * page_size, 128)), jnp.bfloat16)
     records = jnp.arange(keys.shape[0], dtype=jnp.int32)
     cache = jax.jit(lambda c: write_fp8_records(c, records, keys))(
-        jnp.zeros(layout.shape, jnp.uint8)
+        jnp.zeros(layout.shape, jnp.int32)
     )
     pages = 1 + rng.permutation(layout.pages - 1).reshape(groups, -1).astype(np.int32)
     # Contiguous request rows with causal lengths, then invalid padding rows.
@@ -187,39 +180,34 @@ def test_candidate_scoring_matches_dense_reference_real_tpu(counts, unordered):
     _assert_top_scores(selected, scores, allowed, k, ordered=not unordered)
 
 
-@pytest.mark.parametrize("page_size", [64, 128, 256])
 @pytest.mark.parametrize("fragments", [16, 2048, 131072])
-def test_candidate_gather(page_size, fragments):
+def test_candidate_gather(fragments):
     if jax.default_backend() != "tpu":
         pytest.skip("SparseCore execution requires TPU")
-    # A 64-key page occupies 16.5 word rows, rounded up to 17.
-    layout = PackedFP8Layout(8, page_size=page_size)
-    rows = layout.pages * layout.page_rows
-    raw = np.arange(rows * 128, dtype=np.int32).reshape(rows, 128) + 19
-    cache = _cache_of_words(raw, layout)
+    layout = PackedFP8Layout(8)
+    # Distinct words everywhere, padding rows included, so a misread shows.
+    raw = np.arange(np.prod(layout.shape), dtype=np.int32).reshape(layout.shape) + 19
+    blocks = layout.page_size // 8
     ids = np.random.default_rng(19).integers(
-        -1, layout.pages * (page_size // 8), (3, fragments), dtype=np.int32
+        -1, layout.pages * blocks, (3, fragments), dtype=np.int32
     )
     ids[:, ::7] = -1
     offsets = jnp.array([0, 3, 3, 3], jnp.int32)  # Two trailing empty groups.
     out = jax.jit(lambda c, p: gather_candidate_keys(c, p, offsets, block=8))(
-        cache, jnp.asarray(ids)
+        jnp.asarray(raw), jnp.asarray(ids)
     )
-    assert out.shape == (3 * fragments // 16 * 33, 128)
-    out = np.asarray(out).reshape(3, fragments // 16, 33, 128)
+    assert out.shape == (3 * fragments // 16 * PAGE_ROWS, 128)
+    out = np.asarray(out).reshape(3, fragments // 16, PAGE_ROWS, 128)
     # Only valid fragments of live groups are defined; skipped tiles and
     # ignored fragments are left uninitialized by the gather.
     for i, physical in enumerate(ids[0]):
         if physical < 0:
             continue
-        page, fragment = divmod(int(physical), page_size // 8)
-        base = page * layout.page_rows
-        for field in range(33):
-            start = base * 128 + field * page_size + fragment * 8
-            np.testing.assert_array_equal(
-                out[0, i // 16, field, i % 16 * 8 : (i % 16 + 1) * 8],
-                raw.reshape(-1)[start : start + 8],
-            )
+        page, fragment = divmod(int(physical), blocks)
+        np.testing.assert_array_equal(
+            out[0, i // 16, :, i % 16 * 8 : (i % 16 + 1) * 8],
+            raw[page, :PAGE_ROWS, fragment * 8 : (fragment + 1) * 8],
+        )
 
 
 if __name__ == "__main__":
