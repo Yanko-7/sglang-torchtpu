@@ -14,7 +14,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from .mqa_logits.utils import (
+from sglang_tpu.kernels.index_selection.fp8.mqa_logits.utils import (
     QueryTile,
     _dma_rows,
     _head_order,
@@ -23,7 +23,8 @@ from .mqa_logits.utils import (
     _reduce_on_mxu,
     _weighted_selector,
 )
-from .pages import PAGE_RECORDS, PAGE_ROWS
+from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_RECORDS, PAGE_ROWS
+
 from .tuned import (
     PACKED_FP8_PREPARED_MQA_CONFIG,
     PACKED_FP8_PREPARED_PAIRS,

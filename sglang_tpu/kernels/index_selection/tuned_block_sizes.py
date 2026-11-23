@@ -2,16 +2,13 @@
 # Source: src/vllm_torchtpu/kernels/deepseek_v41/index_selection/tuned_block_sizes.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Streaming top-k and candidate publication tables for the FP8 indexer.
+"""Streaming top-k tables for the FP8 indexer.
 
 Only the tables the packed FP8 path reads are carried; the source's BF16
 scorer tables are not ported.
 """
 
 from dataclasses import dataclass
-
-# (generation, queries, token-score width, block size): (rows, output blocks).
-PUBLISH_BLOCK_MAX_CONFIG = {(7, 96, 98816, 8): (96, 1024)}
 
 
 @dataclass(frozen=True)

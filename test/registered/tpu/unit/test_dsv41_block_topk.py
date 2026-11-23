@@ -69,7 +69,8 @@ def test_block_topk(rows, width, distribution, publish):
         jnp.asarray(lengths),
         k=K,
         block_size=BLOCK,
-        publish=publish,
+        top_blocks=publish,
+        force_last_block=bool(publish),
     )
     selected = np.asarray(result[0] if publish else result)
     for row, length in enumerate(lengths):

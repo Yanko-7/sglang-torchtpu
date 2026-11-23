@@ -1,13 +1,15 @@
 # Adapted from vllm-project/vllm-torchtpu (Apache-2.0).
-# Source: src/vllm_torchtpu/kernels/deepseek_v41/index_selection/block_topk.py
+# Sources: src/vllm_torchtpu/kernels/deepseek_v41/index_selection/block_topk.py,
+#   publication.py (Radix)
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 Google LLC
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Exact SparseCore top-k that scans only the highest-maximum key blocks.
 
 Block maxima, reduced on SparseCore, rank the blocks first. Every key scoring
 above the `blocks`-th largest block maximum lies in the top `blocks` blocks,
-and each of those blocks holds a key at or above it (publication forces one
-to +inf). With `blocks > k` their keys therefore contain a valid top-k, so
+and each of those blocks holds a key at or above it (force_last_block forces
+one to +inf). With `blocks > k` their keys therefore contain a valid top-k, so
 only they are gathered and radix-selected instead of the whole score row.
 
 Rows that fit SparseCore VMEM stay resident. Wider rows (1M-token contexts)
@@ -24,11 +26,130 @@ from jax.experimental import xla_metadata
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
-from sglang_tpu.kernels.index_selection.publication import Radix
 from sglang_tpu.kernels.index_selection.streaming_topk import (
+    FP32_BITS,
+    ORDERED_NEG_INF,
+    RADIX_BITS,
     RADIX_BUCKETS,
+    RADIX_MASK,
     _ordered_bits,
 )
+
+
+class Radix:
+    """Radix selection over ordered FP32 key bits staged in VMEM.
+
+    Byte histograms refine the quota-th largest key, then one pass emits the
+    winners in candidate order, so IDs come out ascending without a sort.
+    """
+
+    def __init__(self, histogram, lanes):
+        self.histogram, self.lanes = histogram, lanes
+        self.lane_ids = jnp.arange(lanes, dtype=jnp.int32)
+
+    def positions(self, i):
+        return i * self.lanes + self.lane_ids
+
+    def clear(self):
+        @plsc.parallel_loop(0, RADIX_BUCKETS, self.lanes, unroll=4)
+        def clear(i):
+            self.histogram[pl.ds(i, self.lanes)] = jnp.zeros(self.lanes, jnp.int32)
+
+    def add(self, bits):
+        """Count the top byte of the keys above -inf."""
+        digits = (bits >> (FP32_BITS - RADIX_BITS)).astype(jnp.int32)
+        counts, last = plsc.scan_count(digits, mask=bits > ORDERED_NEG_INF)
+        plsc.addupdate_scatter(self.histogram, [digits], counts, mask=last)
+
+    def pivot(self, quota):
+        """The bucket holding the quota-th largest counted key."""
+        histogram, lanes = self.histogram, self.lanes
+        zero = jnp.asarray(0, jnp.int32)
+
+        @plsc.parallel_loop(0, RADIX_BUCKETS, lanes, carry=zero, unroll=2)
+        def total(i, running):
+            cumulative = plsc.cumsum(histogram[pl.ds(i, lanes)]) + running
+            histogram[pl.ds(i, lanes)] = cumulative
+            return cumulative[-1]
+
+        @plsc.parallel_loop(0, RADIX_BUCKETS, lanes, carry=zero, unroll=2)
+        def find(i, bucket):
+            below = histogram[pl.ds(i, lanes)] <= total - quota
+            return bucket + plsc.all_reduce_population_count(below)[0]
+
+        bucket = jnp.minimum(find, RADIX_MASK)
+        index = jnp.maximum(bucket - self.lane_ids, 0)
+        gathered = plsc.load_gather(histogram, [index])
+        cumulative, previous = gathered[0], gathered[1]
+        count = cumulative - jnp.where(bucket > 0, previous, 0)
+        return bucket, quota - (total - cumulative), total, count
+
+    def threshold(self, values, chunks, quota):
+        """The quota-th largest key; the top byte's histogram is filled."""
+        lanes = self.lanes
+        prefix, remaining, total, count = self.pivot(jnp.int32(quota))
+        keep_all = total <= quota
+        done = keep_all | (remaining == count)
+        remaining_bits = jnp.int32(FP32_BITS - RADIX_BITS)
+        for shift in reversed(range(0, FP32_BITS - RADIX_BITS, RADIX_BITS)):
+            self.clear()
+
+            @plsc.parallel_loop(0, jnp.where(done, 0, chunks), unroll=8)
+            def refine(i, shift=shift, prefix=prefix):
+                bits = values[pl.ds(i * lanes, lanes)].view(jnp.uint32)
+                match = (bits >> (shift + RADIX_BITS)) == prefix.astype(jnp.uint32)
+                digits = ((bits >> shift) & RADIX_MASK).astype(jnp.int32)
+                counts, last = plsc.scan_count(digits, mask=match)
+                plsc.addupdate_scatter(self.histogram, [digits], counts, mask=last)
+
+            bucket, next_remaining, _, count = self.pivot(remaining)
+            prefix = jnp.where(done, prefix, (prefix << RADIX_BITS) | bucket)
+            remaining = jnp.where(done, remaining, next_remaining)
+            remaining_bits = jnp.where(done, remaining_bits, shift)
+            done |= remaining == count
+        lower = prefix.astype(jnp.uint32) << remaining_bits.astype(jnp.uint32)
+        floor = jnp.uint32(ORDERED_NEG_INF + 1)
+        gate = jnp.where(keep_all, floor, jnp.maximum(lower, floor))
+        return total, lower, gate, remaining, done
+
+    def emit(self, values, chunks, quota, selection, destination, ids=None):
+        """Write `ids(i)` (default: positions) of the selected keys, -1 after."""
+        lanes, ids = self.lanes, ids or self.positions
+        total, lower, gate, remaining, done = selection
+
+        @plsc.parallel_loop(
+            jnp.minimum(total // lanes * lanes, quota), quota, lanes, unroll=4
+        )
+        def initialize(i):
+            destination[pl.ds(i, lanes)] = jnp.full(lanes, -1, jnp.int32)
+
+        def store(i, count, selected):
+            ranks = plsc.cumsum(selected.astype(jnp.int32))
+            plsc.store_scatter(destination, [count + ranks - 1], ids(i), mask=selected)
+            return count + plsc.all_reduce_population_count(selected)
+
+        @plsc.parallel_loop(
+            0, jnp.where(done, chunks, 0), carry=jnp.zeros(lanes, jnp.int32), unroll=8
+        )
+        def emit_whole(i, count):
+            bits = values[pl.ds(i * lanes, lanes)].view(jnp.uint32)
+            return store(i, count, bits >= gate)
+
+        @plsc.parallel_loop(
+            0,
+            jnp.where(done, 0, chunks),
+            carry=(jnp.zeros(lanes, jnp.int32), jnp.zeros(lanes, jnp.int32)),
+            unroll=4,
+        )
+        def emit_ranked(i, state):
+            count, ties = state
+            bits = values[pl.ds(i * lanes, lanes)].view(jnp.uint32)
+            equal = bits == lower
+            ranks = plsc.cumsum(equal.astype(jnp.int32)) + ties
+            selected = (bits > lower) | (equal & (ranks <= remaining))
+            return store(i, count, selected), ties + plsc.all_reduce_population_count(
+                equal
+            )
 
 
 def default_blocks(k: int, lanes: int, forced: bool = True) -> int:
@@ -100,7 +221,8 @@ def block_topk(
     *,
     k: int,
     block_size: int,
-    publish: int = 0,
+    top_blocks: int = 0,
+    force_last_block: bool = False,
     scheduling_group_id: int | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
     """Return ascending top-k key IDs per row, padded with -1.
@@ -110,9 +232,10 @@ def block_topk(
         lengths: Int32 [rows] visible keys, clipped to [0, width].
         k: Selected keys per row. Negative infinity is never selected.
         block_size: Keys per block maximum.
-        publish: Also return the IDs of the `publish` highest block maxima,
-            the newest visible block forced first; ascending, -1 padded, and
-            ties keep the lowest IDs.
+        top_blocks: Also return the IDs of the `top_blocks` highest block
+            maxima; ascending, -1 padded, and ties keep the lowest IDs.
+        force_last_block: Rank each row's last visible block above every
+            other block, so `top_blocks` always includes it.
         scheduling_group_id: Optional XLA scheduling-group ID.
     """
     rows, width = scores.shape
@@ -122,10 +245,10 @@ def block_topk(
         scores.dtype != jnp.float32
         or lengths.shape != (rows,)
         or not is_supported(rows, width, k, block_size)
-        or publish % lanes
+        or top_blocks % lanes
     ):
         raise ValueError("Unsupported block top-k shapes or dtypes")
-    blocks = default_blocks(k, lanes, forced=bool(publish))
+    blocks = default_blocks(k, lanes, forced=force_last_block)
     candidates = blocks * block_size
     block_width = pl.cdiv(pl.cdiv(width, block_size), alignment) * alignment
     lengths = jnp.clip(lengths.astype(jnp.int32), 0, width)
@@ -143,8 +266,8 @@ def block_topk(
         num_cores=min(sc.num_cores, pl.cdiv(rows, sc.num_subcores)),
     )
     out_types = (jax.ShapeDtypeStruct((rows, k), jnp.int32),)
-    if publish:
-        out_types += (jax.ShapeDtypeStruct((rows, publish), jnp.int32),)
+    if top_blocks:
+        out_types += (jax.ShapeDtypeStruct((rows, top_blocks), jnp.int32),)
 
     @pl.kernel(
         out_type=out_types,
@@ -154,8 +277,8 @@ def block_topk(
             maxima=pltpu.VMEM((block_width,), jnp.float32),
             histogram=pltpu.VMEM((RADIX_BUCKETS,), jnp.int32),
             block_ids=pltpu.VMEM((blocks,), jnp.int32),
-            # Ordered key bits; first holds the published block IDs.
-            keys=pltpu.VMEM((max(candidates, publish),), jnp.int32),
+            # Ordered key bits; first holds the top block IDs.
+            keys=pltpu.VMEM((max(candidates, top_blocks),), jnp.int32),
             output=pltpu.VMEM((k,), jnp.int32),
             limits=pltpu.VMEM((_length_words(rows),), jnp.int32),
             # Streamed rows: the chosen blocks' keys, fetched from HBM.
@@ -293,8 +416,8 @@ def block_topk(
             def prepare_blocks(i):
                 positions = radix.positions(i)
                 values = block_values(i)
-                if publish:
-                    # Publication rule: the newest visible block always wins.
+                if force_last_block:
+                    # The last visible block outranks every other block.
                     values = jnp.where(positions == live_blocks - 1, jnp.inf, values)
                 live = positions < live_blocks
                 bits = _ordered_bits(jnp.where(live, values, -jnp.inf))
@@ -302,12 +425,12 @@ def block_topk(
                 radix.add(bits)
 
             publish_copy = None
-            if publish:
+            if top_blocks:
                 (publish_ref,) = publish_refs
                 # Staged in `keys`, which stage 2 overwrites after the copy.
-                published = keys.at[pl.ds(0, publish)]
-                top = radix.threshold(maxima, block_chunks, publish)
-                radix.emit(maxima, block_chunks, publish, top, published)
+                published = keys.at[pl.ds(0, top_blocks)]
+                top = radix.threshold(maxima, block_chunks, top_blocks)
+                radix.emit(maxima, block_chunks, top_blocks, top, published)
                 publish_copy = pltpu.async_copy(
                     published, publish_ref.at[row_id], publish_sem
                 )
@@ -374,4 +497,4 @@ def block_topk(
             ),
             result,
         )
-    return result if publish else result[0]
+    return result if top_blocks else result[0]

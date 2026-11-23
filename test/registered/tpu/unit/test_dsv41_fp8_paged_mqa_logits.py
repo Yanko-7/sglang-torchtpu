@@ -140,17 +140,13 @@ def test_unsorted_requests_select_own_pages():
                 jnp.asarray(table),
                 w,
                 n,
-                jnp.empty((tokens, 0), jnp.int32),
                 jnp.asarray(requests, jnp.int32),
                 n.max().reshape(1),
                 layout_args,
                 topk,
-                8,
-                False,
-                False,
                 True,
                 width,
-            )[0]
+            )
         )(q, weights, jnp.asarray(lengths))
     )
     # Reference scores of each row against its own request, scored in sorted order.
