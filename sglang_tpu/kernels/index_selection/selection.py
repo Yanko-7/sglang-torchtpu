@@ -33,7 +33,7 @@ from sglang_tpu.kernels.index_selection.fp8.candidates import (
     PreparedCandidates,
     prepare_candidates,
 )
-from sglang_tpu.kernels.index_selection.fp8.dense_logits import (
+from sglang_tpu.kernels.index_selection.fp8.mqa_logits.dense import (
     fp8_paged_mqa_logits,
 )
 from sglang_tpu.kernels.index_selection.fp8.pages import PackedFP8Layout

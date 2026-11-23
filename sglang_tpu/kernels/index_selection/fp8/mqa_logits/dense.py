@@ -14,7 +14,9 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from .common import (
+from ..pages import PAGE_RECORDS, PAGE_ROWS, PackedFP8Layout, padded_page_rows
+from ..tuned import PACKED_FP8_MQA_CONFIG, paged_mqa_key_tile, paged_mqa_query_tile
+from .utils import (
     QueryTile,
     _dma_rows,
     _head_order,
@@ -23,8 +25,6 @@ from .common import (
     _reduce_on_mxu,
     _weighted_selector,
 )
-from .pages import PAGE_RECORDS, PAGE_ROWS, PackedFP8Layout, padded_page_rows
-from .tuned import PACKED_FP8_MQA_CONFIG, paged_mqa_key_tile, paged_mqa_query_tile
 
 # MXU fragments issued ahead of the one being reduced; measured on v7 (8 beats
 # the tuned table's 10), whose depth still keys the fragment schedule below.

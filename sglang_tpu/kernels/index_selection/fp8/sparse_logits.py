@@ -14,7 +14,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from .common import (
+from .mqa_logits.utils import (
     QueryTile,
     _dma_rows,
     _head_order,
