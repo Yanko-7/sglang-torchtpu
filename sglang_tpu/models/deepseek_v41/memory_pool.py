@@ -9,8 +9,8 @@ only the physical buffers for the shapes the V4.1 Pallas kernels read:
 - Main KV, kv_source layers: FP8 latent words int32 [R, 128] + fp32 scales [R];
   record = full_loc // r, R = ceil((full_size + 256) / 256) * (256 // r), so a main
   page holds 256 // r records and its id is the full page id.
-- Indexer K, kv_source layers: packed FP8 int32 [P * 33, 128] with
-  PackedFP8Layout(P, page_size=128); record = full_loc // r, P = R // 128.
+- Indexer K, kv_source layers: packed FP8 int32 [P, 40, 128] (33 rows padded to
+  whole 8-row tiles), PackedFP8Layout(P); record = full_loc // r, P = R // 128.
 
 The allocators reserve logical page 0, so SWA pages 0..3, main page 0 and the
 indexer pages of full page 0 are never written. Every buffer is a base tensor
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-from dataclasses import dataclass
 from functools import partial
 from typing import Mapping, Optional, Sequence, Tuple
 from unittest.mock import patch
@@ -40,6 +39,11 @@ from sglang.srt.mem_cache.memory_pool import get_tensor_size_bytes
 from sglang.srt.runtime_context import get_exec, get_schedule
 from sglang.srt.utils import ceil_div
 from sglang_tpu.dsv4.dsv4_memory_pool import _zeros_kv_buffer
+from sglang_tpu.kernels.index_selection.fp8.pages import (
+    PAGE_RECORDS,
+    PackedFP8Layout,
+    padded_page_rows,
+)
 from sglang_tpu.models.deepseek_v41.request_window import (
     RESERVED_PAGES,
     RING_PAGES,
@@ -48,42 +52,6 @@ from sglang_tpu.models.deepseek_v41.request_window import (
     ring_rows,
     window_buffer_pages,
 )
-
-try:
-    from sglang_tpu.kernels.deepseek_v41.index_selection.fp8.cache import (
-        PAGE_RECORDS,
-        PAGE_ROWS,
-        PackedFP8Layout,
-    )
-except ModuleNotFoundError as exc:
-    if exc.name != "jax" and not (exc.name or "").startswith("jax."):
-        raise
-    PAGE_RECORDS = 128
-    PAGE_ROWS = 33
-
-    @dataclass(frozen=True)
-    class PackedFP8Layout:  # type: ignore[no-redef]
-        """Pure-Python layout fallback when JAX is absent (CPU unit tests)."""
-
-        pages: int
-        page_stride: int = PAGE_ROWS
-        page_offset: int = 0
-        page_size: int = PAGE_RECORDS
-
-        @property
-        def page_rows(self) -> int:
-            return (PAGE_ROWS * self.page_size + PAGE_RECORDS - 1) // PAGE_RECORDS
-
-        def validate(self, bank_rows: Tuple[int, ...]) -> None:
-            if (
-                self.pages < 1
-                or self.page_stride < self.page_rows
-                or self.page_offset < 0
-                or len(bank_rows) != 1
-                or self.page_offset + self.pages * self.page_stride > bank_rows[0]
-            ):
-                raise ValueError("Packed FP8 page addresses exceed their owners")
-
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +65,8 @@ WORD_LANES = 128
 SWA_BYTES_PER_TOKEN = LATENT_DIM * torch.bfloat16.itemsize
 # One 512 B FP8 record (448 e4m3 + 64 e8m0) plus its fp32 scale companion.
 MAIN_BYTES_PER_RECORD = WORD_LANES * 4 + 4
-# 128 FP8 values + one fp32 scale: 33 word rows per 128-record page.
-INDEX_BYTES_PER_RECORD = PAGE_ROWS * WORD_LANES * 4 // PAGE_RECORDS
+# 128 FP8 values + one fp32 scale: 33 word rows per 128-record page, padded to 40.
+INDEX_BYTES_PER_RECORD = padded_page_rows(PAGE_RECORDS) * WORD_LANES * 4 // PAGE_RECORDS
 
 LOW_RATIOS = (1, 2)
 SUPPORTED_RATIOS = (0, *LOW_RATIOS)
@@ -215,7 +183,7 @@ class DSV41TPUMainKVPool(DeepSeekV4SingleKVPool):
 
 
 class DSV41TPUIndexerPool(DeepSeekV4IndexerPool):
-    """Per kv_source layer packed FP8 index keys int32 [P * 33, 128]."""
+    """Per kv_source layer packed FP8 index keys int32 [P, 40, 128]."""
 
     def __init__(
         self,
@@ -248,10 +216,10 @@ class DSV41TPUIndexerPool(DeepSeekV4IndexerPool):
         )
 
     def _create_buffer(self) -> None:
-        rows = self.layout.pages * self.layout.page_stride
-        self.layout.validate((rows,))
+        shape = self.layout.shape
+        self.layout.validate((shape[0] * shape[1],))
         self.index_k_with_scale_buffer = [
-            _zeros_kv_buffer((rows, WORD_LANES), torch.int32, self.device)
+            _zeros_kv_buffer(shape, torch.int32, self.device)
             for _ in range(self.layer_num)
         ]
 
@@ -612,7 +580,7 @@ class DSV41TPUTokenToKVPool(DeepSeekV4TokenToKVPool):
         return pool.kv_buffer[source_id], pool.scale_buffer[source_id]
 
     def get_index_k(self, layer_id: int) -> torch.Tensor:
-        """Packed FP8 int32 [P * 33, 128] of the layer's kv_source."""
+        """Packed FP8 int32 [P, 40, 128] of the layer's kv_source."""
         self.wait_layer_transfer(layer_id)
         ratio, source_id = self._low_ratio_item(layer_id)
         return self.index_pools[ratio].index_k_with_scale_buffer[source_id]

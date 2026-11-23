@@ -24,8 +24,8 @@ from jax.experimental import xla_metadata
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
-from sglang_tpu.kernels.deepseek_v41.index_selection.publication import Radix
-from sglang_tpu.kernels.deepseek_v41.index_selection.streaming_topk import (
+from sglang_tpu.kernels.index_selection.publication import Radix
+from sglang_tpu.kernels.index_selection.streaming_topk import (
     RADIX_BUCKETS,
     _ordered_bits,
 )

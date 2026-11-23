@@ -23,15 +23,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from sglang_tpu.kernels.deepseek_v41.index_selection.fp8.cache import (
-    PAGE_ROWS,
-    PackedFP8Layout,
-    quantize_index_rows,
-)
-from sglang_tpu.kernels.deepseek_v41.index_selection.fp8.dense_logits import (
+from sglang_tpu.kernels.index_selection.fp8.cache import quantize_index_rows
+from sglang_tpu.kernels.index_selection.fp8.dense_logits import (
     fp8_paged_mqa_logits,
 )
-from sglang_tpu.kernels.deepseek_v41.index_selection.selection import (
+from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_ROWS, PackedFP8Layout
+from sglang_tpu.kernels.index_selection.selection import (
     select_fp8_indexer_jax,
 )
 

@@ -10,7 +10,7 @@ from dataclasses import astuple, dataclass
 import jax
 from jax.experimental.pallas import tpu as pltpu
 
-from .cache import PAGE_RECORDS, PAGE_ROWS
+from .pages import PAGE_RECORDS, PAGE_ROWS
 
 
 @dataclass(frozen=True)

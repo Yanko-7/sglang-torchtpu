@@ -6,20 +6,17 @@
 
 For token t and feature d, byte d%4 of word [d//4,t] contains K[t,d].
 Field 32 holds scales[t] as FP32 bits. Each [33,page_size] page is rounded
-to whole owner rows. Unwritten keys are masked by sequence lengths.
+to whole owner rows, then padded to whole 8-row tiles (pages.py). Unwritten
+keys are masked by sequence lengths.
 """
-
-from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from .pages import PAGE_RECORDS, PAGE_ROWS, PackedFP8Layout
 from .prepare import prepare_sorted_fp8, supports_sorted_fp8
-
-PAGE_RECORDS = 128
-PAGE_ROWS = 33
 
 # Stage up to 128 touched pages, stopping at the sorted invalid-record tail.
 PACKED_FP8_WRITE_BATCH = 128
@@ -39,57 +36,6 @@ def quantize_index_rows(values: jax.Array) -> tuple[jax.Array, jax.Array, jax.Ar
     )
     quantized = (values / scales[..., None]).astype(jnp.float8_e4m3fn)
     return quantized, scales, scale_bytes
-
-
-@dataclass(frozen=True, init=False)
-class PackedFP8Layout:
-    """Location of this layer's pages inside one or two shared word-row owners."""
-
-    pages: int
-    page_stride: int
-    page_offset: int
-    page_size: int
-
-    def __init__(
-        self,
-        pages: int,
-        page_stride: int | None = None,
-        page_offset: int = 0,
-        page_size: int = PAGE_RECORDS,
-    ) -> None:
-        rows = (PAGE_ROWS * page_size + PAGE_RECORDS - 1) // PAGE_RECORDS
-        for name, value in (
-            ("pages", pages),
-            ("page_stride", rows if page_stride is None else page_stride),
-            ("page_offset", page_offset),
-            ("page_size", page_size),
-        ):
-            object.__setattr__(self, name, value)
-
-    @property
-    def page_rows(self) -> int:
-        return (PAGE_ROWS * self.page_size + PAGE_RECORDS - 1) // PAGE_RECORDS
-
-    def validate(self, bank_rows: tuple[int, ...]) -> None:
-        if self.page_size < 1 or self.page_size & (self.page_size - 1):
-            raise ValueError("Packed FP8 page capacity must be a power of two")
-        if len(bank_rows) not in (1, 2) or any(
-            rows < self.page_rows for rows in bank_rows
-        ):
-            raise ValueError("Packed FP8 cache requires one or two nonempty banks")
-        if self.pages < 1 or self.page_stride < self.page_rows or self.page_offset < 0:
-            raise ValueError("Packed FP8 pages require nonoverlapping page slots")
-        end = self.page_offset + (self.pages - 1) * self.page_stride + self.page_rows
-        if end > sum(bank_rows) or max(bank_rows) >= 1 << 29:
-            raise ValueError("Packed FP8 page addresses exceed their owners")
-        if len(bank_rows) == 2:
-            page = min(
-                self.pages - 1,
-                max(0, (bank_rows[0] - self.page_offset) // self.page_stride),
-            )
-            start = self.page_offset + page * self.page_stride
-            if start < bank_rows[0] < start + self.page_rows:
-                raise ValueError("A packed FP8 page must not cross the bank boundary")
 
 
 def _record_addresses(records: jax.Array, layout: PackedFP8Layout):

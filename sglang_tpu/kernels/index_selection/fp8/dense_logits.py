@@ -14,7 +14,6 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from .cache import PAGE_RECORDS, PAGE_ROWS, PackedFP8Layout
 from .common import (
     QueryTile,
     _dma_rows,
@@ -24,6 +23,7 @@ from .common import (
     _reduce_on_mxu,
     _weighted_selector,
 )
+from .pages import PAGE_RECORDS, PAGE_ROWS, PackedFP8Layout, padded_page_rows
 from .tuned import PACKED_FP8_MQA_CONFIG, paged_mqa_key_tile, paged_mqa_query_tile
 
 # MXU fragments issued ahead of the one being reduced; measured on v7 (8 beats
@@ -459,7 +459,9 @@ def fp8_paged_mqa_logits(
     tokens = tokens if query_count is None else query_count
     banks = kv_cache if isinstance(kv_cache, tuple) else (kv_cache,)
     bank_rows = tuple(bank.shape[0] for bank in banks)
-    layout = cache_layout or PackedFP8Layout(sum(bank_rows) // PAGE_ROWS)
+    layout = cache_layout or PackedFP8Layout(
+        sum(bank_rows) // padded_page_rows(PAGE_RECORDS)
+    )
     layout.validate(bank_rows)
     if layout.page_size % PAGE_RECORDS:
         raise ValueError(

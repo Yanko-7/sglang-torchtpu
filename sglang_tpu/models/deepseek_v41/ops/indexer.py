@@ -3,11 +3,12 @@
 
 Single bank, one device per process (no mesh). Each op is a
 ``cpu_export_jax_op`` over the shared kernels in
-``sglang_tpu.kernels.deepseek_v41.index_selection``. ``write_index_k`` donates
+``sglang_tpu.kernels.index_selection``. ``write_index_k`` donates
 the cache and returns its new value; the caller does ``index_k.copy_(result)``.
 
 Layout (``memory_pool.DSV41TPUTokenToKVPool.get_index_k``): INT32
-``[P * 33, 128]``, ``PackedFP8Layout(P, 33, 0, 128)``. Record ``full_loc // r``
+``[P, 40, 128]``, ``PackedFP8Layout(P, 40, 0, 128)``; the kernels read it as
+``[P * 40, 128]`` rows, which is the same buffer. Record ``full_loc // r``
 lives on indexer page ``record // 128``; the per-request indexer page table is
 ``expand_index_page_table`` of the full page table for ratio 1 (full page p ->
 indexer pages 2p, 2p + 1) and the full page table itself for ratio 2.
@@ -26,14 +27,15 @@ import jax
 import jax.numpy as jnp
 import torch
 
-from sglang_tpu.kernels.deepseek_v41.index_selection.fp8.cache import (
-    PAGE_RECORDS,
-    PAGE_ROWS,
-    PackedFP8Layout,
+from sglang_tpu.kernels.index_selection.fp8.cache import (
     quantize_index_rows,
     write_fp8_records,
 )
-from sglang_tpu.kernels.deepseek_v41.index_selection.selection import (
+from sglang_tpu.kernels.index_selection.fp8.pages import (
+    PAGE_RECORDS,
+    PackedFP8Layout,
+)
+from sglang_tpu.kernels.index_selection.selection import (
     prepare_fp8_candidates,
     select_fp8_indexer_jax,
     select_fp8_prepared,
@@ -62,7 +64,9 @@ def _write_index_k(
     page_size: int,
 ) -> jax.Array:
     layout = PackedFP8Layout(pages, page_stride, page_offset, page_size)
-    return write_fp8_records((index_k,), records, keys.astype(jnp.bfloat16), layout)[0]
+    rows = index_k.reshape(-1, PAGE_RECORDS)
+    keys = keys.astype(jnp.bfloat16)
+    return write_fp8_records((rows,), records, keys, layout)[0].reshape(index_k.shape)
 
 
 def _compact(ids: jax.Array) -> jax.Array:
@@ -141,7 +145,7 @@ def _select(
         masked_pages = _mask_pages_past_rows(index_pages, requests, lengths, page_size)
         selected, published = select_fp8_indexer_jax(
             q8,
-            (index_k,),
+            (index_k.reshape(-1, PAGE_RECORDS),),
             masked_pages,
             weights.astype(jnp.float32) * q_scales,
             lengths,
@@ -181,7 +185,13 @@ def _prepare_candidates(
     layout_args = (pages, page_stride, page_offset, page_size)
     width = index_pages.shape[1] * page_size
     return prepare_fp8_candidates(
-        (index_k,), index_pages, candidates, requests, layout_args, block_size, width
+        (index_k.reshape(-1, PAGE_RECORDS),),
+        index_pages,
+        candidates,
+        requests,
+        layout_args,
+        block_size,
+        width,
     )
 
 
@@ -413,8 +423,3 @@ def select_prepared(
         topk,
         block_size,
     )
-
-
-def index_k_rows(pages: int) -> int:
-    """INT32 rows of a ``pages``-page cache."""
-    return pages * PAGE_ROWS
