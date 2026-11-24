@@ -1,6 +1,4 @@
 # Adapted from vllm-project/vllm-torchtpu (Apache-2.0).
-# Sources: src/vllm_torchtpu/kernels/deepseek_v41/index_selection/block_topk.py,
-#   publication.py (Radix)
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 Google LLC
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -22,10 +20,10 @@ import math
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
-from jax.experimental import xla_metadata
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
+from sglang_tpu.kernels import scheduling_group
 from sglang_tpu.kernels.index_selection.streaming_topk import (
     FP32_BITS,
     ORDERED_NEG_INF,
@@ -198,8 +196,6 @@ def _plan(rows, width, block_width, k, blocks, block_size):
 
 def is_supported(rows: int, width: int, k: int, block_size: int) -> bool:
     """Lane-aligned shapes whose block maxima fit SparseCore VMEM."""
-    if jax.default_backend() != "tpu":
-        return False
     info = pltpu.get_tpu_info()
     sc = info.sparse_core
     if sc is None or rows < 1 or block_size < 1 or sc.num_lanes % block_size:
@@ -489,12 +485,5 @@ def block_topk(
             last_row = first + ((rows - 1 - first) // stride) * stride
             pltpu.make_async_copy(output, out_ref.at[last_row], output_sem).wait()
 
-    result = kernel(scores, token_lengths)
-    if scheduling_group_id is not None:
-        result = jax.tree.map(
-            lambda x: xla_metadata.set_xla_metadata(
-                x, _scheduling_group_id=scheduling_group_id
-            ),
-            result,
-        )
+    result = scheduling_group.tag(kernel(scores, token_lengths), scheduling_group_id)
     return result if top_blocks else result[0]

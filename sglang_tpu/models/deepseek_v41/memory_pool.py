@@ -217,7 +217,7 @@ class DSV41TPUIndexerPool(DeepSeekV4IndexerPool):
 
     def _create_buffer(self) -> None:
         shape = self.layout.shape
-        self.layout.validate((shape[0] * shape[1],))
+        self.layout.validate(shape[0] * shape[1])
         self.index_k_with_scale_buffer = [
             _zeros_kv_buffer(shape, torch.int32, self.device)
             for _ in range(self.layer_num)

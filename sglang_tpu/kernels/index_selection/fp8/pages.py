@@ -1,5 +1,4 @@
 # Adapted from vllm-project/vllm-torchtpu (Apache-2.0).
-# Source: src/vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/cache.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Packed FP8 index-key page geometry, shared by the kernels and KV pools.
@@ -25,7 +24,7 @@ def padded_page_rows(page_size: int) -> int:
 
 @dataclass(frozen=True, init=False)
 class PackedFP8Layout:
-    """Location of this layer's pages inside one or two shared word-row owners."""
+    """Location of this layer's pages inside a shared word-row cache."""
 
     pages: int
     page_stride: int
@@ -57,23 +56,11 @@ class PackedFP8Layout:
         """int32 shape of an owner that holds exactly these pages from row 0."""
         return self.pages, self.page_stride, PAGE_RECORDS
 
-    def validate(self, bank_rows: tuple[int, ...]) -> None:
+    def validate(self, rows: int) -> None:
         if self.page_size < 1 or self.page_size & (self.page_size - 1):
             raise ValueError("Packed FP8 page capacity must be a power of two")
-        if len(bank_rows) not in (1, 2) or any(
-            rows < self.page_rows for rows in bank_rows
-        ):
-            raise ValueError("Packed FP8 cache requires one or two nonempty banks")
         if self.pages < 1 or self.page_stride < self.page_rows or self.page_offset < 0:
             raise ValueError("Packed FP8 pages require nonoverlapping page slots")
         end = self.page_offset + (self.pages - 1) * self.page_stride + self.page_rows
-        if end > sum(bank_rows) or max(bank_rows) >= 1 << 29:
-            raise ValueError("Packed FP8 page addresses exceed their owners")
-        if len(bank_rows) == 2:
-            page = min(
-                self.pages - 1,
-                max(0, (bank_rows[0] - self.page_offset) // self.page_stride),
-            )
-            start = self.page_offset + page * self.page_stride
-            if start < bank_rows[0] < start + self.page_rows:
-                raise ValueError("A packed FP8 page must not cross the bank boundary")
+        if end > rows or rows >= 1 << 29:
+            raise ValueError("Packed FP8 page addresses exceed the cache")

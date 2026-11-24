@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Torch ops over the DeepSeek-V4.1 packed FP8 indexer (ratio 1 and 2 layers).
 
-Single bank, one device per process (no mesh). Each op is a
+One device per process (no mesh). Each op is a
 ``cpu_export_jax_op`` over the shared kernels in
 ``sglang_tpu.kernels.index_selection`` and the V4.1 candidate kernels in
 ``models.deepseek_v41.kernels.index_candidates``. ``write_index_k`` donates
@@ -67,7 +67,7 @@ def _write_index_k(
     layout = PackedFP8Layout(pages, page_stride, page_offset, page_size)
     rows = index_k.reshape(-1, PAGE_RECORDS)
     keys = keys.astype(jnp.bfloat16)
-    return write_fp8_records((rows,), records, keys, layout)[0].reshape(index_k.shape)
+    return write_fp8_records(rows, records, keys, layout).reshape(index_k.shape)
 
 
 def _compact(ids: jax.Array) -> jax.Array:
@@ -146,7 +146,7 @@ def _select(
         masked_pages = _mask_pages_past_rows(index_pages, requests, lengths, page_size)
         selected, published = select_fp8_candidates_jax(
             q8,
-            (index_k.reshape(-1, PAGE_RECORDS),),
+            index_k.reshape(-1, PAGE_RECORDS),
             masked_pages,
             weights.astype(jnp.float32) * q_scales,
             lengths,
@@ -186,7 +186,7 @@ def _prepare_candidates(
     layout_args = (pages, page_stride, page_offset, page_size)
     width = index_pages.shape[1] * page_size
     return prepare_fp8_candidates(
-        (index_k.reshape(-1, PAGE_RECORDS),),
+        index_k.reshape(-1, PAGE_RECORDS),
         index_pages,
         candidates,
         requests,

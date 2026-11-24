@@ -1,5 +1,4 @@
 # Adapted from vllm-project/vllm-torchtpu (Apache-2.0).
-# Source: src/vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/sparse_logits.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FP8 pair-union scoring with contiguous per-query output windows."""
@@ -24,8 +23,7 @@ from sglang_tpu.kernels.index_selection.fp8.mqa_logits.utils import (
     weighted_selector,
 )
 from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_RECORDS, PAGE_ROWS
-
-from .tuned import (
+from sglang_tpu.models.deepseek_v41.kernels.index_candidates.tuned import (
     PACKED_FP8_PREPARED_MQA_CONFIG,
     PACKED_FP8_PREPARED_PAIRS,
     PACKED_FP8_PREPARED_PREFIX_TOKENS,

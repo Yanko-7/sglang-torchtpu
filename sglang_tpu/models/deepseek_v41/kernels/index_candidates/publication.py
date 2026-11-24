@@ -1,6 +1,4 @@
 # Adapted from vllm-project/vllm-torchtpu (Apache-2.0).
-# Sources: src/vllm_torchtpu/kernels/deepseek_v41/index_selection/publication.py,
-#   kernels/deepseek_v41/indexer.py (candidate blocks)
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 Google LLC
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -20,9 +18,10 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from sglang_tpu.kernels.index_selection.selection import unordered_top_k
-
-from .tuned import PUBLISH_BLOCK_MAX_CONFIG
+from sglang_tpu.kernels.index_selection import streaming_topk
+from sglang_tpu.models.deepseek_v41.kernels.index_candidates.tuned import (
+    PUBLISH_BLOCK_MAX_CONFIG,
+)
 
 
 @functools.partial(jax.jit, static_argnames=("block_size",))
@@ -40,7 +39,6 @@ def candidate_block_scores(
         and any(
             key[1:] == (rows, width, block_size) for key in PUBLISH_BLOCK_MAX_CONFIG
         )
-        and jax.default_backend() == "tpu"
     ):
         config = PUBLISH_BLOCK_MAX_CONFIG.get(
             (pltpu.get_tpu_info().generation, rows, width, block_size)
@@ -127,14 +125,15 @@ def publish_candidate_blocks(
         block_scores = candidate_block_scores(scores, lengths, block_size=block_size)
     blocks = block_scores.shape[1]
     cand_k = min(count, blocks)
-    if unordered and blocks >= 2048 and blocks % 16 == 0 and cand_k % 16 == 0:
-        block_lengths = (lengths + block_size - 1) // block_size
-        published = unordered_top_k(
+    if unordered and blocks >= 2048 and streaming_topk.is_supported(blocks, cand_k):
+        published = streaming_topk.streaming_topk(
             block_scores,
-            cand_k,
-            jnp.minimum(block_lengths, blocks),
-            scheduling_group_id,
-        ).astype(jnp.int32)
+            valid_lengths=jnp.minimum(pl.cdiv(lengths, block_size), blocks),
+            k=cand_k,
+            exclude_neg_inf=True,
+            unordered=True,
+            scheduling_group_id=scheduling_group_id,
+        )
     else:
         values, ids = jax.lax.top_k(block_scores, cand_k)
         published = jnp.where(values > -jnp.inf, ids, -1).astype(jnp.int32)

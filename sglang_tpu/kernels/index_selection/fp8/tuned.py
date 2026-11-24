@@ -1,5 +1,4 @@
 # Adapted from vllm-project/vllm-torchtpu (Apache-2.0).
-# Source: src/vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/tuned.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TPU v7 tiles and pipeline depths for the packed FP8 indexer."""
@@ -7,10 +6,9 @@
 import math
 from dataclasses import astuple, dataclass
 
-import jax
 from jax.experimental.pallas import tpu as pltpu
 
-from .pages import PAGE_RECORDS, PAGE_ROWS
+from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_RECORDS, PAGE_ROWS
 
 
 @dataclass(frozen=True)
@@ -54,19 +52,3 @@ def paged_mqa_query_tile(query_size: int, heads: int) -> int:
     info = pltpu.get_tpu_info()
     return min(query_size, info.num_sublanes, max(1, info.mxu_column_size // heads))
 
-
-def indexer_query_rows(tokens: int, query_tile: int) -> int:
-    """Derive query chunks from query tiles and the SparseCore wave size."""
-    if jax.default_backend() != "tpu":
-        return tokens
-    sc = pltpu.get_tpu_info().sparse_core
-    if sc is None:
-        return tokens
-    wave = math.lcm(query_tile, sc.num_cores * sc.num_subcores)
-    chunk = math.gcd(tokens, wave)
-    return chunk if chunk % query_tile == 0 else tokens
-
-
-def topk_reconstruction_threshold(k: int) -> int:
-    """Bound the live candidate excess proportionally to the output width."""
-    return min(8192, 4 * k)

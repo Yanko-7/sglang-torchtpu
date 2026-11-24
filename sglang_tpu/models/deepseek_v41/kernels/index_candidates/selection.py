@@ -1,8 +1,4 @@
 # Adapted from vllm-project/vllm-torchtpu (Apache-2.0).
-# Sources (epic/dsv41):
-#   src/vllm_torchtpu/kernels/deepseek_v41/indexer.py (score/top-k pipelines)
-#   src/vllm_torchtpu/models/vllm/deepseek_v41/v2/indexer_select.py
-#   src/vllm_torchtpu/models/vllm/deepseek_v41/v2/indexer_fp8.py (JAX parts)
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4.1 candidate selection over the packed FP8 index keys.
@@ -18,24 +14,28 @@ import functools
 
 import jax
 import jax.numpy as jnp
-from jax.experimental import xla_metadata
 
+from sglang_tpu.kernels import scheduling_group
 from sglang_tpu.kernels.index_selection import streaming_topk
 from sglang_tpu.kernels.index_selection.fp8.pages import PackedFP8Layout
-from sglang_tpu.kernels.index_selection.fp8.tuned import (
-    PACKED_FP8_MQA_CONFIG,
-    indexer_query_rows,
-    topk_reconstruction_threshold,
-)
+from sglang_tpu.kernels.index_selection.fp8.tuned import PACKED_FP8_MQA_CONFIG
 from sglang_tpu.kernels.index_selection.selection import (
     TileBlocks,
-    pipeline_score_topk_unrolled,
+    indexer_query_rows,
+    pipeline_score_topk,
     select_fp8_indexer_jax,
 )
-
-from .candidates import PreparedCandidates, prepare_candidates
-from .publication import publish_candidate_blocks
-from .sparse import candidate_windows, fp8_gathered_mqa_logits
+from sglang_tpu.models.deepseek_v41.kernels.index_candidates.candidates import (
+    PreparedCandidates,
+    prepare_candidates,
+)
+from sglang_tpu.models.deepseek_v41.kernels.index_candidates.publication import (
+    publish_candidate_blocks,
+)
+from sglang_tpu.models.deepseek_v41.kernels.index_candidates.sparse import (
+    candidate_windows,
+    fp8_gathered_mqa_logits,
+)
 
 
 def _select_candidate_tokens(
@@ -54,7 +54,7 @@ def _select_candidate_tokens(
     if unordered and streaming_topk.is_supported(
         scores.shape[1],
         k,
-        reconstruct_threshold=topk_reconstruction_threshold(k),
+        reconstruct_threshold=streaming_topk.topk_reconstruction_threshold(k),
         logical_block_count=candidates.shape[1],
     ):
         return streaming_topk.streaming_topk(
@@ -66,7 +66,7 @@ def _select_candidate_tokens(
             k=k,
             exclude_neg_inf=True,
             unordered=True,
-            reconstruct_threshold=topk_reconstruction_threshold(k),
+            reconstruct_threshold=streaming_topk.topk_reconstruction_threshold(k),
             scheduling_group_id=scheduling_group_id,
         )
     if unordered:
@@ -140,11 +140,7 @@ def _score_and_select_candidates(
             query_start=start,
             query_count=query_chunk_size,
         )
-        return (
-            scores
-            if group is None
-            else xla_metadata.set_xla_metadata(scores, _scheduling_group_id=group)
-        )
+        return scheduling_group.tag(scores, group)
 
     if unordered:
 
@@ -163,7 +159,7 @@ def _score_and_select_candidates(
                 scheduling_group_id=group,
             )
 
-        selected = pipeline_score_topk_unrolled(
+        selected = pipeline_score_topk(
             num_queries // query_chunk_size,
             lambda tile: tile * query_chunk_size,
             score,
@@ -172,6 +168,7 @@ def _score_and_select_candidates(
                 dst, src, tile * query_chunk_size, axis=0
             ),
             jnp.full((num_queries, k), -1, jnp.int32),
+            bound_lifetimes=False,
         )
     else:
         scores = score(jnp.int32(0), None)
@@ -191,7 +188,7 @@ def _score_and_select_candidates(
 
 def select_fp8_candidates_jax(
     q: jax.Array,
-    banks: tuple[jax.Array, ...],
+    cache: jax.Array,
     page_table: jax.Array,
     weights: jax.Array,
     lengths: jax.Array,
@@ -221,7 +218,7 @@ def select_fp8_candidates_jax(
     dense = functools.partial(
         select_fp8_indexer_jax,
         q,
-        banks,
+        cache,
         page_table,
         weights,
         lengths,
@@ -263,7 +260,7 @@ def select_fp8_candidates_jax(
         if not candidates.shape[1]:
             return jnp.full((q.shape[0], min(topk, width)), -1, jnp.int32)
         gathered_candidates = prepare_candidates(
-            banks, page_table, candidates, requests, layout, block_size, width
+            cache, page_table, candidates, requests, layout, block_size, width
         )
         return _score_and_select_candidates(
             q, weights, lengths, gathered_candidates, topk, block_size, unordered, width
@@ -275,7 +272,7 @@ def select_fp8_candidates_jax(
 
 
 def prepare_fp8_candidates(
-    banks: tuple[jax.Array, ...],
+    cache: jax.Array,
     page_table: jax.Array,
     candidates: jax.Array,
     requests: jax.Array,
@@ -285,7 +282,7 @@ def prepare_fp8_candidates(
 ) -> tuple[jax.Array, ...]:
     return tuple(
         prepare_candidates(
-            banks,
+            cache,
             page_table,
             candidates,
             requests,

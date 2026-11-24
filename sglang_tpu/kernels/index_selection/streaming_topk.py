@@ -1,5 +1,4 @@
 # Adapted from vllm-project/vllm-torchtpu (Apache-2.0).
-# Source: src/vllm_torchtpu/kernels/deepseek_v41/index_selection/streaming_topk.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2024-2025 SGLang Team
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -14,19 +13,36 @@ from __future__ import annotations
 
 import functools
 import math
+from dataclasses import dataclass
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
-from jax.experimental import xla_metadata
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
-from sglang_tpu.kernels.index_selection.tuned_block_sizes import (
-    STREAMING_TOPK_CONFIG,
-    StreamingTopKConfig,
-)
+from sglang_tpu.kernels import scheduling_group
+
+
+@dataclass(frozen=True)
+class StreamingTopKConfig:
+    loop_unroll: int = 1
+    bootstrap_multiplier: int = 4
+    bitonic_ids: bool = False
+
+
+# (generation, score width, topk): measured scan, bootstrap and output sorting.
+STREAMING_TOPK_CONFIG = {
+    (7, width, 512): StreamingTopKConfig(4, 8, True)
+    for width in (16384, 32768, 49408, 98816)
+}
+
+
+def topk_reconstruction_threshold(k: int) -> int:
+    """Bound the live candidate excess proportionally to the output width."""
+    return min(8192, 4 * k)
+
 
 # Byte-wise radix passes over IEEE FP32 keys. These describe the representation,
 # independently of TensorCore/SparseCore lane counts.
@@ -119,7 +135,7 @@ def is_supported(
     logical_block_count: int = 0,
 ) -> bool:
     """Check lane alignment and the minimum per-subcore scratch footprint."""
-    if jax.default_backend() != "tpu" or not 0 < k <= width:
+    if not 0 < k <= width:
         return False
     info = pltpu.get_tpu_info()
     sc = info.sparse_core
@@ -990,11 +1006,7 @@ def streaming_topk(
     result = kernel(scores, lengths, (logical_blocks,) if mapped else (), start)
     if output_width != k:
         result = result[:, :k]
-    if scheduling_group_id is not None:
-        result = xla_metadata.set_xla_metadata(
-            result, _scheduling_group_id=scheduling_group_id
-        )
-    return result
+    return scheduling_group.tag(result, scheduling_group_id)
 
 
 __all__ = ["streaming_topk"]

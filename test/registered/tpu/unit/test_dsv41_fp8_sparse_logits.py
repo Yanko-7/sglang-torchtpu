@@ -39,8 +39,8 @@ def _layout_args(layout):
     return (layout.pages, layout.page_stride, layout.page_offset, layout.page_size)
 
 
-def _zero_banks(layout):
-    return (jnp.zeros((layout.pages * layout.page_stride, 128), jnp.int32),)
+def _zero_cache(layout):
+    return jnp.zeros((layout.pages * layout.page_stride, 128), jnp.int32)
 
 
 def _sorted_ids(ids):
@@ -57,8 +57,8 @@ def _candidate_fixture(counts, short, seed=371):
     layout = PackedFP8Layout(groups * width // page_size, page_size=page_size)
     keys = jnp.asarray(rng.normal(size=(layout.pages * page_size, 128)), jnp.bfloat16)
     records = jnp.arange(keys.shape[0], dtype=jnp.int32)
-    banks = jax.jit(lambda b: write_fp8_records(b, records, keys, layout))(
-        _zero_banks(layout)
+    cache = jax.jit(lambda c: write_fp8_records(c, records, keys, layout))(
+        _zero_cache(layout)
     )
     pages = rng.permutation(layout.pages).reshape(groups, -1).astype(np.int32)
     # Contiguous request rows with causal lengths, then invalid padding rows.
@@ -80,7 +80,7 @@ def _candidate_fixture(counts, short, seed=371):
     weights = jnp.asarray(rng.uniform(0.01, 0.1, (tokens, 32)), jnp.float32) * scales
     return dict(
         layout=layout,
-        banks=banks,
+        cache=cache,
         pages=pages,
         owners=owners,
         lengths=lengths,
@@ -103,7 +103,7 @@ def _reference_scores(f):
             f["pages"][group, position // layout.page_size] * layout.page_size
             + position % layout.page_size
         )
-        keys = read_fp8_records(f["banks"], jnp.asarray(records), layout)
+        keys = read_fp8_records(f["cache"], jnp.asarray(records), layout)
         logits = jnp.einsum(
             "qhd,kd->qhk",
             f["q"][rows].astype(jnp.float32),
@@ -157,7 +157,7 @@ def test_candidate_scoring_matches_dense_reference_real_tpu(counts, unordered):
     )
     prepared = jax.jit(
         lambda: prepare_fp8_candidates(
-            f["banks"],
+            f["cache"],
             pages,
             candidates,
             owners,
@@ -192,10 +192,9 @@ def test_candidate_scoring_matches_dense_reference_real_tpu(counts, unordered):
     _assert_top_scores(selected, scores, allowed, k, ordered=not unordered)
 
 
-@pytest.mark.parametrize("banks_count", [1, 2])
 @pytest.mark.parametrize("page_size", [64, 128, 256])
 @pytest.mark.parametrize("fragments", [16, 2048, 131072])
-def test_candidate_gather(banks_count, page_size, fragments):
+def test_candidate_gather(page_size, fragments):
     if jax.default_backend() != "tpu":
         pytest.skip("SparseCore execution requires TPU")
     # Nonzero page offset/stride proves that physical addressing does not
@@ -207,12 +206,6 @@ def test_candidate_gather(banks_count, page_size, fragments):
     )
     owner_rows = 8 * layout.page_stride + 1
     raw = np.arange(owner_rows * 128, dtype=np.int32).reshape(owner_rows, 128) + 19
-    split = 1 + 4 * layout.page_stride  # Bank boundary between whole pages.
-    banks = (
-        (jnp.asarray(raw),)
-        if banks_count == 1
-        else (jnp.asarray(raw[:split]), jnp.asarray(raw[split:]))
-    )
     ids = np.random.default_rng(19).integers(
         -1, layout.pages * (page_size // 8), (3, fragments), dtype=np.int32
     )
@@ -220,7 +213,7 @@ def test_candidate_gather(banks_count, page_size, fragments):
     offsets = jnp.array([0, 3, 3, 3], jnp.int32)  # Two trailing empty groups.
     out = jax.jit(
         lambda b, p: gather_candidate_keys(b, p, offsets, block=8, layout=layout)
-    )(banks, jnp.asarray(ids))
+    )(jnp.asarray(raw), jnp.asarray(ids))
     assert out.shape == (3 * fragments // 16 * 33, 128)
     out = np.asarray(out).reshape(3, fragments // 16, 33, 128)
     # Only valid fragments of live groups are defined; skipped tiles and

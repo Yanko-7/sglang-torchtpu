@@ -1,6 +1,4 @@
 # Adapted from vllm-project/vllm-torchtpu (Apache-2.0).
-# Sources: src/vllm_torchtpu/kernels/deepseek_v41/index_selection/fp8/tuned.py,
-#   index_selection/tuned_block_sizes.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TPU v7 tiles and pipeline depths for DeepSeek-V4.1 candidate selection."""
@@ -19,10 +17,7 @@ PACKED_FP8_PREPARED_PREFIX_TOKENS = 4096
 # Rolling SparseCore gather: three buffers overlap reads and writes for 8-token blocks.
 # 64 pages per tile divides tokens * 2 * 2048 candidate blocks over 32 subcores, so the
 # gather output needs no trailing slice; 96 left a sliced 8.25 GiB copy at 2048 tokens.
-PAGED_MQA_GATHER_CONFIG = {(8, 1): (64, 3), (8, 2): (64, 3)}
-
-# (candidate block, physical page, banks): pages per tile and pipeline buffers.
-PAGED_MQA_FRAGMENT_GATHER_CONFIG = {(8, 128, 2): (64, 4)}
+PAGED_MQA_GATHER_CONFIG = {8: (64, 3)}
 
 # (generation, queries, token-score width, block size): (rows, output blocks).
 PUBLISH_BLOCK_MAX_CONFIG = {(7, 96, 98816, 8): (96, 1024)}
