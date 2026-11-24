@@ -32,7 +32,7 @@ from sglang_tpu.kernels.index_selection.streaming_topk import (
     RADIX_BITS,
     RADIX_BUCKETS,
     RADIX_MASK,
-    _ordered_bits,
+    ordered_bits,
 )
 
 
@@ -286,7 +286,7 @@ def block_topk(
             score_sems=pltpu.SemaphoreType.DMA((2,)),
             output_sem=pltpu.SemaphoreType.DMA,
             length_sem=pltpu.SemaphoreType.DMA,
-            publish_sem=pltpu.SemaphoreType.DMA,
+            top_block_sem=pltpu.SemaphoreType.DMA,
             fetch_sem=pltpu.SemaphoreType.DMA,
         ),
         compiler_params=pltpu.CompilerParams(needs_layout_passes=False),
@@ -296,7 +296,7 @@ def block_topk(
         score_ref,
         length_ref,
         out_ref,
-        *publish_refs,
+        *top_block_refs,
         score_buffers,
         maxima,
         histogram,
@@ -308,7 +308,7 @@ def block_topk(
         score_sems,
         output_sem,
         length_sem,
-        publish_sem,
+        top_block_sem,
         fetch_sem,
     ):
         radix = Radix(histogram, lanes)
@@ -420,19 +420,19 @@ def block_topk(
                     # The last visible block outranks every other block.
                     values = jnp.where(positions == live_blocks - 1, jnp.inf, values)
                 live = positions < live_blocks
-                bits = _ordered_bits(jnp.where(live, values, -jnp.inf))
+                bits = ordered_bits(jnp.where(live, values, -jnp.inf))
                 maxima[pl.ds(i * lanes, lanes)] = bits.view(jnp.float32)
                 radix.add(bits)
 
-            publish_copy = None
+            top_block_copy = None
             if top_blocks:
-                (publish_ref,) = publish_refs
+                (top_block_ref,) = top_block_refs
                 # Staged in `keys`, which stage 2 overwrites after the copy.
-                published = keys.at[pl.ds(0, top_blocks)]
+                top_ids = keys.at[pl.ds(0, top_blocks)]
                 top = radix.threshold(maxima, block_chunks, top_blocks)
-                radix.emit(maxima, block_chunks, top_blocks, top, published)
-                publish_copy = pltpu.async_copy(
-                    published, publish_ref.at[row_id], publish_sem
+                radix.emit(maxima, block_chunks, top_blocks, top, top_ids)
+                top_block_copy = pltpu.async_copy(
+                    top_ids, top_block_ref.at[row_id], top_block_sem
                 )
                 # The selection consumed the histogram; refill its top byte.
                 radix.clear()
@@ -450,8 +450,8 @@ def block_topk(
                 owner = plsc.load_gather(block_ids, [candidate // block_size])
                 return owner, owner * block_size + candidate % block_size
 
-            if publish_copy is not None:
-                publish_copy.wait()
+            if top_block_copy is not None:
+                top_block_copy.wait()
             chosen_blocks = jnp.minimum(chosen[0], blocks)
             key_chunks = pl.cdiv(chosen_blocks * block_size, lanes)
             if not resident:
@@ -467,7 +467,7 @@ def block_topk(
                     values = plsc.load_gather(score_buffers, [index])
                 else:
                     values = fetched[pl.ds(i * lanes, lanes)]
-                bits = _ordered_bits(jnp.where(valid, values, -jnp.inf))
+                bits = ordered_bits(jnp.where(valid, values, -jnp.inf))
                 keys[pl.ds(i * lanes, lanes)] = bits.view(jnp.int32)
                 radix.add(bits)
 

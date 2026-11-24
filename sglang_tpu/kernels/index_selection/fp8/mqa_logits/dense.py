@@ -18,12 +18,12 @@ from ..pages import PAGE_RECORDS, PAGE_ROWS, PackedFP8Layout, padded_page_rows
 from ..tuned import PACKED_FP8_MQA_CONFIG, paged_mqa_key_tile, paged_mqa_query_tile
 from .utils import (
     QueryTile,
-    _dma_rows,
-    _head_order,
-    _next_query_tile,
-    _reduce_heads,
-    _reduce_on_mxu,
-    _weighted_selector,
+    dma_rows,
+    head_order,
+    next_query_tile,
+    reduce_heads,
+    reduce_on_mxu,
+    weighted_selector,
 )
 
 # MXU fragments issued ahead of the one being reduced; measured on v7 (8 beats
@@ -86,7 +86,7 @@ class _DenseKernel:
         self.rest_pages = self.tile_pages - self.half_pages
         self.rest_chunk = next(c for c in (8, 6, 4, 2, 1) if self.rest_pages % c == 0)
         owners = jnp.repeat(jnp.arange(self.q_tile), self.heads)[:, None]
-        owners = _head_order(owners, self.q_tile, self.sublanes)[:, 0]
+        owners = head_order(owners, self.q_tile, self.sublanes)[:, 0]
         selector = jnp.arange(self.q_tile)[:, None] == owners[None, :]
         self.selector = selector.astype(jnp.bfloat16)
 
@@ -99,14 +99,14 @@ class _DenseKernel:
         if zero:
             dst[...] = jnp.zeros(dst.shape, dst.dtype)
         sem = self.q_sem.at[slot]
-        _dma_rows(self.q, dst, sem, query.count, wait, src_start=query.start)
+        dma_rows(self.q, dst, sem, query.count, wait, src_start=query.start)
 
     def release_outputs(self, pair):
         # counts: rows pending per score slot [0, 4), [4, 6) unused and
         # -inf padding row copies [6, 8) per query slot.
         for slot in (2 * pair, 2 * pair + 1)[: self.tiles]:
             src = self.scores.at[slot]
-            _dma_rows(src, src, self.write_sem.at[slot], self.counts[slot], wait=True)
+            dma_rows(src, src, self.write_sem.at[slot], self.counts[slot], wait=True)
         src = self.padding.at[pl.ds(0, 1)]
         dst = self.out.at[pl.ds(0, 1), pl.ds(0, self.key_tile)]
         row = pltpu.make_async_copy(src, dst, self.pad_sem.at[pair])
@@ -149,7 +149,7 @@ class _DenseKernel:
         pltpu.make_async_copy(src, src, self.read_sem.at[slot]).wait()
 
     def next_query(self, query):
-        return _next_query_tile(query, self.offsets, self.q_tile, self.end)
+        return next_query_tile(query, self.offsets, self.q_tile, self.end)
 
     def row_ids(self, query):
         last = self.tokens - 1
@@ -215,7 +215,7 @@ class _QueryBlock:
         k, slot = self.k, self.output_slot(tile)
         src, sem = k.scores.at[slot], k.write_sem.at[slot]
         dst = k.out.at[:, pl.ds(tile * k.key_tile, k.key_tile)]
-        _dma_rows(src, dst, sem, self.query.count, wait, dst_start=self.first_row)
+        dma_rows(src, dst, sem, self.query.count, wait, dst_start=self.first_row)
 
     def owner(self, future):
         """Request row and local tile of a future tile."""
@@ -307,9 +307,9 @@ class _QueryBlock:
                 # Keyed to the tuned depth, so another issue depth keeps each
                 # fragment's head-sum arithmetic.
                 tuned = fragment + PACKED_FP8_MQA_CONFIG.issue_depth
-                mxu = _reduce_on_mxu(fragment, tuned, count, every=4, drain=4)
+                mxu = reduce_on_mxu(fragment, tuned, count, every=4, drain=4)
                 products = pending.pop(fragment)
-                values = _reduce_heads(
+                values = reduce_heads(
                     products, *self.reduction, sublanes=k.sublanes, use_mxu=mxu
                 )
                 self.store(tile, fragment, values, remaining)
@@ -356,7 +356,7 @@ class _QueryBlock:
         k = self.k
         dst = k.out.at[:, pl.ds(tile * k.key_tile, k.key_tile)]
         sem = k.pad_sem.at[self.q_slot]
-        _dma_rows(k.padding, dst, sem, self.query.count, dst_start=self.first_row)
+        dma_rows(k.padding, dst, sem, self.query.count, dst_start=self.first_row)
 
     def run(self):
         k, query, q_slot = self.k, self.query, self.q_slot
@@ -381,11 +381,11 @@ class _QueryBlock:
         k.copy_queries(query, q_slot, wait=True)
         rows = k.row_ids(query)
         weight = jnp.concatenate([k.weights[r][:, None] for r in rows])
-        selector = _weighted_selector(k.selector, k.weights, rows, sublanes=k.sublanes)
-        self.reduction = (_head_order(weight, k.q_tile, k.sublanes), selector)
+        selector = weighted_selector(k.selector, k.weights, rows, sublanes=k.sublanes)
+        self.reduction = (head_order(weight, k.q_tile, k.sublanes), selector)
         queries = k.queries[pl.ds(q_slot * k.q_tile, k.q_tile)]
         queries = queries.reshape(k.q_tile * k.heads, k.dim)
-        self.lhs = _head_order(queries, k.q_tile, k.sublanes)
+        self.lhs = head_order(queries, k.q_tile, k.sublanes)
         if k.tiles == 1:
             pl.when(scored)(partial(self.step_tile, jnp.int32(0), None))
         else:

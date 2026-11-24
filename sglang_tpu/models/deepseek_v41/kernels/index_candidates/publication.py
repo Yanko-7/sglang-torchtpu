@@ -20,7 +20,7 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from sglang_tpu.kernels.index_selection.selection import _sparsecore_top_k
+from sglang_tpu.kernels.index_selection.selection import unordered_top_k
 
 from .tuned import PUBLISH_BLOCK_MAX_CONFIG
 
@@ -129,7 +129,7 @@ def publish_candidate_blocks(
     cand_k = min(count, blocks)
     if unordered and blocks >= 2048 and blocks % 16 == 0 and cand_k % 16 == 0:
         block_lengths = (lengths + block_size - 1) // block_size
-        published = _sparsecore_top_k(
+        published = unordered_top_k(
             block_scores,
             cand_k,
             jnp.minimum(block_lengths, blocks),

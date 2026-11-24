@@ -26,7 +26,7 @@ def quantize_index_rows(values: jax.Array) -> tuple[jax.Array, jax.Array, jax.Ar
     """Return E4M3 values, FP32 scales and E8M0 scale bytes for D128 vectors."""
     # One power-of-two scale covers each post-RoPE vector, independent of layout.
     if values.shape[-1] != 128:
-        raise ValueError("V4.1 FP8 index vectors must have 128 channels")
+        raise ValueError("FP8 index vectors must have 128 channels")
     values = values.astype(jnp.float32)
     amax = jnp.maximum(jnp.abs(values).max(axis=-1), 1e-4)
     exponent = jnp.ceil(jnp.log2(amax / 448.0)).astype(jnp.int32)

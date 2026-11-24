@@ -53,7 +53,7 @@ class _Selection(NamedTuple):
     boundary_ties: jax.Array
 
 
-def _ordered_bits(keys: jax.Array) -> jax.Array:
+def ordered_bits(keys: jax.Array) -> jax.Array:
     """Preserve FP32 radix ordering, including signed zero."""
     bits = keys.view(jnp.uint32)
     sign = (bits.view(jnp.int32) >> (FP32_BITS - 1)).view(jnp.uint32)
@@ -483,7 +483,7 @@ def streaming_topk(
                     bits = (
                         ~source_ids[pl.ds(i, lanes)].astype(jnp.uint32)
                         if by_id
-                        else _ordered_bits(source_keys[pl.ds(i, lanes)])
+                        else ordered_bits(source_keys[pl.ds(i, lanes)])
                     )
                     digits = digits_for(bits)
                     valid = i + lane_ids < remaining
@@ -508,7 +508,7 @@ def streaming_topk(
                     survivors, outputs = carry
                     keys = source_keys[pl.ds(i, lanes)]
                     ids = source_ids[pl.ds(i, lanes)]
-                    bits = ~ids.astype(jnp.uint32) if by_id else _ordered_bits(keys)
+                    bits = ~ids.astype(jnp.uint32) if by_id else ordered_bits(keys)
                     digits = digits_for(bits)
                     valid = i + lane_ids < remaining
                     accept = valid & (digits > pivot)
@@ -592,7 +592,7 @@ def streaming_topk(
                 ids = selected_ids[pl.ds(i, lanes)]
                 candidates[pl.ds(i, lanes)] = keys
                 candidate_ids[pl.ds(i, lanes)] = ids
-                bits = jnp.where(ids >= 0, _ordered_bits(keys), jnp.uint32(UINT32_MAX))
+                bits = jnp.where(ids >= 0, ordered_bits(keys), jnp.uint32(UINT32_MAX))
                 if not unordered:
                     last_id = jnp.where(
                         bits < minimum,
@@ -847,7 +847,7 @@ def streaming_topk(
                                             ids < threshold_id
                                         )
                                 else:
-                                    bits = _ordered_bits(keys)
+                                    bits = ordered_bits(keys)
                                     accept = bits > threshold
                                     if not unordered:
                                         accept |= (bits == threshold) & (

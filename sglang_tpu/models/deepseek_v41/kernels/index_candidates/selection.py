@@ -82,7 +82,7 @@ def _select_candidate_tokens(
         + slots % block_size
     )
     _, logical, slots = jax.lax.sort(
-        (~streaming_topk._ordered_bits(scores), logical, slots), dimension=1, num_keys=2
+        (~streaming_topk.ordered_bits(scores), logical, slots), dimension=1, num_keys=2
     )
     logical, slots = logical[:, :k], slots[:, :k]
     values = jnp.take_along_axis(scores, slots, axis=1)

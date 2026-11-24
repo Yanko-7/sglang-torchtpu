@@ -16,12 +16,12 @@ from jax.experimental.pallas import tpu as pltpu
 
 from sglang_tpu.kernels.index_selection.fp8.mqa_logits.utils import (
     QueryTile,
-    _dma_rows,
-    _head_order,
-    _next_query_tile,
-    _reduce_heads,
-    _reduce_on_mxu,
-    _weighted_selector,
+    dma_rows,
+    head_order,
+    next_query_tile,
+    reduce_heads,
+    reduce_on_mxu,
+    weighted_selector,
 )
 from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_RECORDS, PAGE_ROWS
 
@@ -74,10 +74,10 @@ def _kernel(
     begin, width = query_start[()], out.shape[1]
     group_rows = pool.shape[0] // (offsets.shape[0] - 1)
     next_query = partial(
-        _next_query_tile, offsets=offsets, tile_size=q_tile, end=begin + out.shape[0]
+        next_query_tile, offsets=offsets, tile_size=q_tile, end=begin + out.shape[0]
     )
     lanes = jnp.arange(PAGE_RECORDS)
-    owners = _head_order(
+    owners = head_order(
         jnp.repeat(jnp.arange(q_tile), heads)[:, None], q_tile, sublanes
     )[:, 0]
     selector = (jnp.arange(q_tile)[:, None] == owners[None, :]).astype(jnp.bfloat16)
@@ -117,7 +117,7 @@ def _kernel(
         destination = queries.at[pl.ds(slot * q_tile, q_tile)]
         if not wait:
             destination[...] = jnp.zeros(destination.shape, destination.dtype)
-        _dma_rows(
+        dma_rows(
             q,
             destination,
             q_sem.at[slot],
@@ -147,7 +147,7 @@ def _kernel(
 
     def release(slot):
         src = output(slot)
-        _dma_rows(src, src, write_sem.at[slot], counts[slot], wait=True)
+        dma_rows(src, src, write_sem.at[slot], counts[slot], wait=True)
 
     def visible(row, offset):
         # Window mask in output columns; column zero is union token offset.
@@ -181,7 +181,7 @@ def _kernel(
         scores[slot, 0:1, pl.ds(0, width)] = jnp.where(
             visible(query_rows[0], 0), first, -jnp.inf
         ).reshape(1, -1)
-        _dma_rows(
+        dma_rows(
             output(slot),
             out,
             write_sem.at[slot],
@@ -226,8 +226,8 @@ def _kernel(
             slot, buffer = slot_of(step, p), key_buffer(step, p)
             query_rows = rows(query)
             weight = jnp.concatenate([weights[r][:, None] for r in query_rows])
-            head_weights = _head_order(weight, q_tile, sublanes)
-            mxu_selector = _weighted_selector(
+            head_weights = head_order(weight, q_tile, sublanes)
+            mxu_selector = weighted_selector(
                 selector, weights, query_rows, sublanes=sublanes
             )
             # A short group's resident second row is the next group's query;
@@ -237,7 +237,7 @@ def _kernel(
                 if resident
                 else queries[pl.ds(slot * q_tile, q_tile)]
             )
-            lhs = _head_order(source.reshape(q_tile * heads, dim), q_tile, sublanes)
+            lhs = head_order(source.reshape(q_tile * heads, dim), q_tile, sublanes)
 
             def qk(fragment):
                 parts = key_parts(buffer, fragment)
@@ -259,13 +259,13 @@ def _kernel(
                 return jnp.maximum(logits.astype(jnp.bfloat16), jnp.bfloat16(0))
 
             def store(products, fragment, stage, count):
-                values = _reduce_heads(
+                values = reduce_heads(
                     products,
                     head_weights,
                     mxu_selector,
                     sublanes=sublanes,
                     # Stagger the MXU reductions of the group's pairs.
-                    use_mxu=_reduce_on_mxu(
+                    use_mxu=reduce_on_mxu(
                         fragment * pairs + p, stage, count, every=5, drain=2
                     ),
                 )

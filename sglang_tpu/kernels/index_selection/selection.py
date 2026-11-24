@@ -96,7 +96,7 @@ def pipeline_score_topk_bounded(
     )
     # Gate current scores and next preparation on the previous selection
     # so unrolling does not extend every score buffer's lifetime.
-    with jax.named_scope("DSV41ScoreTopKBoundedPipeline"):
+    with jax.named_scope("ScoreTopKBoundedPipeline"):
         current = score(prepare(jnp.int32(0)), None)
         previous = None
         for tile in range(num_tiles - 1):
@@ -143,7 +143,7 @@ def pipeline_score_topk(num_tiles, prepare, score, select, write, output):
         return replacement, result
 
     pairs = (num_tiles - 1) // 2
-    with jax.named_scope("DSV41ScoreTopKPipeline"):
+    with jax.named_scope("ScoreTopKPipeline"):
         state = lax.fori_loop(0, pairs, body, (first, output))
         if 2 * pairs < num_tiles - 1:
             state = advance(jnp.int32(2 * pairs), state)
@@ -154,8 +154,8 @@ def pipeline_score_topk(num_tiles, prepare, score, select, write, output):
 
 
 _INDEX_UNTILED_SCORE_ELEMENTS = 1 << 27
-# Keys per block maximum that block top-k reduces on SparseCore for layers
-# without candidate publication: one maximum per half 16-lane vector.
+# Keys per block maximum that block top-k reduces on SparseCore when the caller
+# asks for no top blocks: one maximum per half 16-lane vector.
 _BLOCK_TOPK_BLOCK = 8
 
 
@@ -227,7 +227,7 @@ def _threshold_top_k(scores: jax.Array, k: int) -> jax.Array:
     ).astype(jnp.int32)
 
 
-def _sparsecore_top_k(
+def unordered_top_k(
     scores: jax.Array,
     k: int,
     lengths: jax.Array,
@@ -283,7 +283,7 @@ def _visible_top_k(
         and width % 16 == 0
         and k % 16 == 0
     ):
-        return _sparsecore_top_k(scores, k, jnp.minimum(lengths, width))
+        return unordered_top_k(scores, k, jnp.minimum(lengths, width))
 
     def select(columns, scores):
         scores = scores[:, :columns]
@@ -324,8 +324,8 @@ def select_indices_jax(
     logical = jnp.arange(width)[None, :]
     visible = logical < lengths[:, None]
     scores = jnp.where(visible, scores, -jnp.inf)
-    published = None if blocks is None else blocks.rows(scores, lengths)
-    # Ascending: preserves V4.1's logical, hence attention accumulation, order.
+    top_blocks = None if blocks is None else blocks.rows(scores, lengths)
+    # Ascending: keeps logical order, hence the attention accumulation order.
     k = min(topk, width)
     indices = _visible_top_k(scores, k, lengths.max(), lengths, unordered)
     if unordered and width >= 2048 and width % 16 == 0 and k % 16 == 0:
@@ -336,7 +336,7 @@ def select_indices_jax(
         selected = jnp.where(valid, indices, -1).astype(jnp.int32)
         if unordered:
             selected = _compact_selected(selected)
-    return selected if blocks is None else (selected, published)
+    return selected if blocks is None else (selected, top_blocks)
 
 
 def _query_start_loc(requests: jax.Array, num_requests: int) -> jax.Array:
@@ -424,7 +424,7 @@ def _select_fp8_indexer_jax(
         topk,
         reconstruct_threshold=topk_reconstruction_threshold(topk),
     )
-    publish_rows = blocks is not None
+    with_blocks = blocks is not None
     select_topk = functools.partial(
         streaming_topk.streaming_topk,
         k=topk,
@@ -436,7 +436,7 @@ def _select_fp8_indexer_jax(
     chunk_rows = prefill_chunk_rows or indexer_query_rows(tokens, query_tile)
     # Decode top-k scans only the blocks that can hold a winner. Callers asking
     # for top blocks rank the same SparseCore block maxima for them.
-    select_block = blocks.block_size if publish_rows else _BLOCK_TOPK_BLOCK
+    select_block = blocks.block_size if with_blocks else _BLOCK_TOPK_BLOCK
     block_select = (
         stream_select
         and prefill_chunk_rows is None
@@ -484,7 +484,7 @@ def _select_fp8_indexer_jax(
         order = jnp.argsort(inputs[-1], stable=True)
         sorted_inputs = tuple(x[order] for x in inputs)
         output = jnp.full((padded, min(topk, width)), -1, jnp.int32)
-        if publish_rows:
+        if with_blocks:
             output = (output, jnp.full((padded, blocks.count), -1, jnp.int32))
         # Unroll SparseCore calls to avoid XLA loop lowering failures;
         # barriers bound score-buffer lifetimes.
@@ -500,11 +500,11 @@ def _select_fp8_indexer_jax(
                     row_lengths,
                     topk,
                     unordered,
-                    blocks if publish_rows else None,
+                    blocks if with_blocks else None,
                 )
             else:
                 selected = select_topk(scores, valid_lengths=row_lengths)
-                if publish_rows:
+                if with_blocks:
                     selected = (selected, blocks.rows(scores, row_lengths))
             output = jax.tree.map(
                 lambda dst, src: jax.lax.dynamic_update_slice_in_dim(
@@ -530,14 +530,14 @@ def _select_fp8_indexer_jax(
                 row_lengths,
                 k=topk,
                 block_size=select_block,
-                top_blocks=blocks.count if publish_rows else 0,
-                force_last_block=publish_rows and blocks.force_last_block,
+                top_blocks=blocks.count if with_blocks else 0,
+                force_last_block=with_blocks and blocks.force_last_block,
                 scheduling_group_id=group,
             )
         selected = select_topk(
             scores, valid_lengths=row_lengths, scheduling_group_id=group
         )
-        if publish_rows:
+        if with_blocks:
             return selected, blocks.rows(scores, row_lengths, scheduling_group_id=group)
         return selected
 
@@ -552,11 +552,11 @@ def _select_fp8_indexer_jax(
         # runtime branch to the serial path: a branch costs an overlay load at its
         # entry. Score tiles may split a request; the kernel resumes it mid-group.
         output = jnp.full((tokens, topk), -1, jnp.int32)
-        if publish_rows:
+        if with_blocks:
             output = (output, jnp.full((tokens, blocks.count), -1, jnp.int32))
         pipeline = (
             pipeline_score_topk_bounded
-            if prefill_chunk_rows is not None or publish_rows
+            if prefill_chunk_rows is not None or with_blocks
             else pipeline_score_topk_unrolled
         )
         selected = pipeline(
@@ -569,16 +569,16 @@ def _select_fp8_indexer_jax(
             write,
             output,
         )
-        if publish_rows:
-            selected, published = selected
-            published = jnp.where(valid_requests[:, None], published, -1)
+        if with_blocks:
+            selected, top_blocks = selected
+            top_blocks = jnp.where(valid_requests[:, None], top_blocks, -1)
         # Batch-wide short-context bypass: every visible key, as in the reference.
         # A select rather than a cond keeps the scoring path free of branches.
         short = jnp.minimum(batch_max.max(), width) <= topk
         ids = jnp.arange(topk, dtype=jnp.int32)
         visible = jnp.where(ids < lengths[:tokens, None], ids, -1)
         selected = jnp.where(short, visible, selected)
-        return (selected, published) if publish_rows else selected
+        return (selected, top_blocks) if with_blocks else selected
 
     # A caller-supplied query_start_loc asserts grouped rows, as upstream: no
     # runtime branch. Derived boundaries fall back to the sorting serial path.
