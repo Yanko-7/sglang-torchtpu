@@ -8,8 +8,6 @@ from dataclasses import astuple, dataclass
 
 from jax.experimental.pallas import tpu as pltpu
 
-from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_RECORDS, PAGE_ROWS
-
 
 @dataclass(frozen=True)
 class PagedMQAConfig:
@@ -38,9 +36,6 @@ PACKED_FP8_DENSE_MIN_KEY_TILE = 4096
 def paged_mqa_key_tile(width: int, page_size: int, cap: int) -> int:
     """Balance tiles at the device MXU-column granularity."""
     alignment = math.lcm(page_size, pltpu.get_tpu_info().mxu_column_size)
-    # Tiny storage pages use padded owner rows; keep the same K-buffer budget.
-    page_rows = (PAGE_ROWS * page_size + PAGE_RECORDS - 1) // PAGE_RECORDS
-    cap = cap * PAGE_ROWS * page_size // (PAGE_RECORDS * page_rows)
     cap = max(alignment, cap // alignment * alignment)
     tiles = max(1, (width + cap - 1) // cap)
     tile = (width + tiles * alignment - 1) // (tiles * alignment) * alignment
@@ -51,4 +46,3 @@ def paged_mqa_query_tile(query_size: int, heads: int) -> int:
     """Bound queries by the MXU footprint and head-reduction sublanes."""
     info = pltpu.get_tpu_info()
     return min(query_size, info.num_sublanes, max(1, info.mxu_column_size // heads))
-

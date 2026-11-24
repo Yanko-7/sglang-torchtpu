@@ -28,7 +28,7 @@ from sglang_tpu.kernels.index_selection import (
 from sglang_tpu.kernels.index_selection.fp8.mqa_logits.dense import (
     fp8_paged_mqa_logits,
 )
-from sglang_tpu.kernels.index_selection.fp8.pages import PackedFP8Layout
+from sglang_tpu.kernels.index_selection.fp8.pages import cache_geometry
 from sglang_tpu.kernels.index_selection.fp8.tuned import (
     PACKED_FP8_MQA_CONFIG,
     paged_mqa_key_tile,
@@ -206,7 +206,6 @@ def _select_fp8_indexer_jax(
     lengths: jax.Array,
     requests: jax.Array,
     batch_max: jax.Array,
-    layout_args: tuple[int, ...],
     topk: int,
     unordered: bool,
     score_width: int,
@@ -215,7 +214,7 @@ def _select_fp8_indexer_jax(
     query_start_loc: jax.Array | None = None,
     prefill_chunk_rows: int | None = None,
 ):
-    layout = PackedFP8Layout(*layout_args)
+    _, page_size = cache_geometry(cache.shape)
     tokens, width = q.shape[0], score_width
     if tokens == 0:
         selected = jnp.empty((0, min(topk, width)), jnp.int32)
@@ -226,15 +225,13 @@ def _select_fp8_indexer_jax(
         raise ValueError(
             "Packed FP8 model scorer requires H32/D128 and nonempty context"
         )
-    key_tile = paged_mqa_key_tile(
-        width, layout.page_size, PACKED_FP8_MQA_CONFIG.key_tile
-    )
+    key_tile = paged_mqa_key_tile(width, page_size, PACKED_FP8_MQA_CONFIG.key_tile)
     query_tile = PACKED_FP8_MQA_CONFIG.query_tile
     capacity = (width + key_tile - 1) // key_tile * key_tile
-    pages = page_table[:, : (width + layout.page_size - 1) // layout.page_size]
+    pages = page_table[:, : (width + page_size - 1) // page_size]
     pages = jnp.pad(
         pages,
-        ((0, 0), (0, capacity // layout.page_size - pages.shape[1])),
+        ((0, 0), (0, capacity // page_size - pages.shape[1])),
         constant_values=-1,
     )
 
@@ -304,7 +301,6 @@ def _select_fp8_indexer_jax(
             max_model_len=capacity if stream_select else width,
             q_scale=jnp.ones_like(row_weights, dtype=jnp.float32),
             query_size=query_tile,
-            cache_layout=layout,
             query_start=start if shared else 0,
             query_count=rows,
             reuse_keys=prefill_chunk_rows is not None and capacity == key_tile,
@@ -412,7 +408,6 @@ def select_fp8_indexer_jax(
     lengths: jax.Array,
     requests: jax.Array,
     batch_max: jax.Array,
-    layout_args: tuple[int, ...],
     topk: int,
     unordered: bool,
     score_width: int,
@@ -436,14 +431,11 @@ def select_fp8_indexer_jax(
         lengths,
         requests,
         batch_max,
-        layout_args,
         topk,
         unordered,
     )
-    layout = PackedFP8Layout(*layout_args)
-    width = paged_mqa_key_tile(
-        score_width, layout.page_size, PACKED_FP8_MQA_CONFIG.key_tile
-    )
+    _, page_size = cache_geometry(cache.shape)
+    width = paged_mqa_key_tile(score_width, page_size, PACKED_FP8_MQA_CONFIG.key_tile)
     capacity = (score_width + width - 1) // width * width
     chunk = max(
         PACKED_FP8_MQA_CONFIG.query_tile,

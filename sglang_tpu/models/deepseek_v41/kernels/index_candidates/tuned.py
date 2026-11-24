@@ -14,10 +14,11 @@ PACKED_FP8_PREPARED_PAIRS = 2
 PACKED_FP8_PREPARED_PREFIX_TOKENS = 4096
 
 
-# Rolling SparseCore gather: three buffers overlap reads and writes for 8-token blocks.
-# 64 pages per tile divides tokens * 2 * 2048 candidate blocks over 32 subcores, so the
-# gather output needs no trailing slice; 96 left a sliced 8.25 GiB copy at 2048 tokens.
-PAGED_MQA_GATHER_CONFIG = {8: (64, 3)}
+# SparseCore gather, block size: (fragments per step, buffers). TC tiling needs
+# whole 128-lane metadata rows; three 8-token buffers fill SparseCore VMEM.
+# 128 divides tokens * 2 * 2048 blocks over 32 subcores: no 8.25 GiB output slice.
+# v7, exp-qvpug7wr3q: 4% slower than 64 at 32 decode groups, on par at 128 and prefill.
+PAGED_MQA_GATHER_CONFIG = {8: (128, 3)}
 
 # (generation, queries, token-score width, block size): (rows, output blocks).
 PUBLISH_BLOCK_MAX_CONFIG = {(7, 96, 98816, 8): (96, 1024)}

@@ -809,11 +809,7 @@ class DSV41TPUAttnBackend(AttentionBackend):
                 indexer.k_norm(indexer.wk(latent)), group_pos, layer.freqs_cis
             )
             index_k = pool.get_index_k(layer.layer_id)
-            index_k.copy_(
-                self.indexer_ops.write_index_k(
-                    index_k, records, keys, pool.index_k_layout(layer.layer_id)
-                )
-            )
+            index_k.copy_(self.indexer_ops.write_index_k(index_k, records, keys))
             # Candidate K gathered before this write is stale.
             metadata.prepared_candidates.pop(pool.index_source(layer.layer_id), None)
 
@@ -912,7 +908,7 @@ class DSV41TPUAttnBackend(AttentionBackend):
                 device=x.device,
             )
         block_size = max(1, indexer.candidate_block_size)
-        width = low.index_pages.shape[1] * pool.index_k_layout(layer.layer_id)[3]
+        width = low.index_pages.shape[1] * PAGE_RECORDS
         if consume and self.indexer_ops.uses_prepared_candidates(
             count=candidates.shape[1], block_size=block_size, width=width
         ):
@@ -935,7 +931,6 @@ class DSV41TPUAttnBackend(AttentionBackend):
                 metadata.token_rows,
                 low.lengths,
                 candidates,
-                pool.index_k_layout(layer.layer_id),
                 topk=self.index_topk,
                 block_size=block_size,
                 publish=publish,
@@ -964,7 +959,6 @@ class DSV41TPUAttnBackend(AttentionBackend):
                 low.index_pages,
                 candidates,
                 metadata.token_rows,
-                pool.index_k_layout(layer.layer_id),
                 block_size=block_size,
             )
             metadata.prepared_candidates[key] = prepared

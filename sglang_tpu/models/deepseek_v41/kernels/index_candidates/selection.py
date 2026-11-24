@@ -17,7 +17,6 @@ import jax.numpy as jnp
 
 from sglang_tpu.kernels import scheduling_group
 from sglang_tpu.kernels.index_selection import streaming_topk
-from sglang_tpu.kernels.index_selection.fp8.pages import PackedFP8Layout
 from sglang_tpu.kernels.index_selection.fp8.tuned import PACKED_FP8_MQA_CONFIG
 from sglang_tpu.kernels.index_selection.selection import (
     TileBlocks,
@@ -26,6 +25,7 @@ from sglang_tpu.kernels.index_selection.selection import (
     select_fp8_indexer_jax,
 )
 from sglang_tpu.models.deepseek_v41.kernels.index_candidates.candidates import (
+    SPARSE_CANDIDATE_BLOCK_SIZES,
     PreparedCandidates,
     prepare_candidates,
 )
@@ -195,7 +195,6 @@ def select_fp8_candidates_jax(
     candidates: jax.Array,
     requests: jax.Array,
     batch_max: jax.Array,
-    layout_args: tuple[int, ...],
     topk: int,
     block_size: int,
     candidate_write: bool,
@@ -224,7 +223,6 @@ def select_fp8_candidates_jax(
         lengths,
         requests,
         batch_max,
-        layout_args,
         topk,
         unordered,
         width,
@@ -248,19 +246,18 @@ def select_fp8_candidates_jax(
         return dense(blocks)
     if not sparse_logits:
         return dense(), candidates
-    if block_size not in (8, 16, 32, 64, 128):
+    if block_size not in SPARSE_CANDIDATE_BLOCK_SIZES:
         raise ValueError(f"Unsupported candidate block size {block_size}")
     if q.shape[0] == 0:
         return jnp.empty((0, min(topk, width)), jnp.int32), candidates
     if q.shape[1:] != (32, 128):
         raise ValueError("Packed FP8 model scorer requires H32/D128")
-    layout = PackedFP8Layout(*layout_args)
 
     def sparse():
         if not candidates.shape[1]:
             return jnp.full((q.shape[0], min(topk, width)), -1, jnp.int32)
         gathered_candidates = prepare_candidates(
-            cache, page_table, candidates, requests, layout, block_size, width
+            cache, page_table, candidates, requests, block_size, width
         )
         return _score_and_select_candidates(
             q, weights, lengths, gathered_candidates, topk, block_size, unordered, width
@@ -276,20 +273,11 @@ def prepare_fp8_candidates(
     page_table: jax.Array,
     candidates: jax.Array,
     requests: jax.Array,
-    layout: tuple[int, ...],
     block: int,
     width: int,
 ) -> tuple[jax.Array, ...]:
     return tuple(
-        prepare_candidates(
-            cache,
-            page_table,
-            candidates,
-            requests,
-            PackedFP8Layout(*layout),
-            block,
-            width,
-        )
+        prepare_candidates(cache, page_table, candidates, requests, block, width)
     )
 
 

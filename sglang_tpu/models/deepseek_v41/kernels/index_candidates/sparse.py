@@ -22,7 +22,7 @@ from sglang_tpu.kernels.index_selection.fp8.mqa_logits.utils import (
     reduce_on_mxu,
     weighted_selector,
 )
-from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_RECORDS, PAGE_ROWS
+from sglang_tpu.kernels.index_selection.fp8.pages import KEY_FIELDS, PAGE_RECORDS
 from sglang_tpu.models.deepseek_v41.kernels.index_candidates.tuned import (
     PACKED_FP8_PREPARED_MQA_CONFIG,
     PACKED_FP8_PREPARED_PAIRS,
@@ -129,7 +129,7 @@ def _kernel(
         )
 
     def load_keys(query, buffer, wait=False):
-        count = pl.cdiv(limit(query), PAGE_RECORDS) * PAGE_ROWS
+        count = pl.cdiv(limit(query), PAGE_RECORDS) * KEY_FIELDS
 
         @pl.when(count > 0)
         def transfer():
@@ -195,8 +195,8 @@ def _kernel(
                 keys[
                     buffer,
                     pl.ds(
-                        (fragment * mxu + offset) // PAGE_RECORDS * PAGE_ROWS,
-                        PAGE_ROWS - 1,
+                        (fragment * mxu + offset) // PAGE_RECORDS * KEY_FIELDS,
+                        KEY_FIELDS - 1,
                     ),
                 ],
                 q.dtype,
@@ -270,7 +270,7 @@ def _kernel(
                 for offset in range(0, mxu, PAGE_RECORDS):
                     page = (fragment * mxu + offset) // PAGE_RECORDS
                     scale = lax.bitcast_convert_type(
-                        keys[buffer, pl.ds((page + 1) * PAGE_ROWS - 1, 1)], jnp.float32
+                        keys[buffer, pl.ds((page + 1) * KEY_FIELDS - 1, 1)], jnp.float32
                     )
                     # Unmasked; windows are applied once per output row.
                     scores[slot, :, pl.ds(page * PAGE_RECORDS, PAGE_RECORDS)] = (
@@ -362,15 +362,15 @@ def fp8_gathered_mqa_logits(
     info = cast(pltpu.TpuInfo, pltpu.get_tpu_info())
     groups = query_start_loc.shape[0] - 1
     group_rows = keys.shape[0] // groups
-    if keys.shape != (groups * group_rows, PAGE_RECORDS) or group_rows % PAGE_ROWS:
+    if keys.shape != (groups * group_rows, PAGE_RECORDS) or group_rows % KEY_FIELDS:
         raise ValueError("Gathered K must contain equal packed regions per group")
     if windows.shape != (q.shape[0], 4) or windows.dtype != jnp.int32:
         raise ValueError("Query windows must be int32 [queries, 4]")
-    capacity = group_rows // PAGE_ROWS * PAGE_RECORDS
+    capacity = group_rows // KEY_FIELDS * PAGE_RECORDS
     if output_width > capacity:
         raise ValueError("Output width exceeds gathered K capacity")
     tile = pl.cdiv(capacity, info.mxu_column_size) * info.mxu_column_size
-    padded_rows = tile // PAGE_RECORDS * PAGE_ROWS
+    padded_rows = tile // PAGE_RECORDS * KEY_FIELDS
     keys = jnp.pad(
         keys.reshape(groups, group_rows, PAGE_RECORDS),
         ((0, 0), (0, padded_rows - group_rows), (0, 0)),

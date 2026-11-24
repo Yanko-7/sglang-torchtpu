@@ -26,27 +26,25 @@ from sglang_tpu.kernels.index_selection.fp8.cache import quantize_index_rows
 from sglang_tpu.kernels.index_selection.fp8.mqa_logits.dense import (
     fp8_paged_mqa_logits,
 )
-from sglang_tpu.kernels.index_selection.fp8.pages import PAGE_ROWS, PackedFP8Layout
+from sglang_tpu.kernels.index_selection.fp8.pages import KEY_FIELDS, cache_shape
 
 
-def _pack(keys, layout):
-    """Feature-major pages: field f of record r at row-word f * page_size + r."""
+def _pack(keys, pages, page_size):
+    """Byte b of field f of record r at [r // page_size, f, b, r % page_size]."""
     values, scales, _ = quantize_index_rows(keys)
-    bits = np.asarray(jax.lax.bitcast_convert_type(values, jnp.uint8))
-    bits = bits.astype(np.uint32).reshape(-1, 32, 4)
-    words = bits[..., 0] | bits[..., 1] << 8 | bits[..., 2] << 16 | bits[..., 3] << 24
     fields = np.concatenate(
-        (words.view(np.int32), np.asarray(scales).view(np.int32)[:, None]), axis=1
+        (
+            np.asarray(jax.lax.bitcast_convert_type(values, jnp.uint8)).reshape(
+                -1, KEY_FIELDS - 1, 4
+            ),
+            np.asarray(scales).view(np.uint8).reshape(-1, 1, 4),
+        ),
+        axis=1,
     )
-    size, records = layout.page_size, np.arange(len(keys))
-    words_at = (records // size * layout.page_stride * 128)[:, None]
-    words_at = (
-        words_at + np.arange(PAGE_ROWS)[None, :] * size + (records % size)[:, None]
-    )
-    pool = np.zeros(layout.pages * layout.page_stride * 128, np.int32)
-    pool[words_at] = fields
+    pool = fields.reshape(pages, page_size, KEY_FIELDS, 4).transpose(0, 2, 3, 1)
+    assert pool.shape == cache_shape(pages, page_size)
     dequantized = values.astype(jnp.float32) * scales[:, None]
-    return pool.reshape(-1, 128), dequantized
+    return np.ascontiguousarray(pool), dequantized
 
 
 @pytest.mark.parametrize(
@@ -63,11 +61,11 @@ def test_paged_mqa_logits_matches_reference(page_size, max_model_len):
     lengths = np.concatenate([b + np.arange(c) for b, c in zip(bases, counts)])
     owners = np.repeat(np.arange(len(counts)), counts)
     per_request = -(-max_model_len // page_size)
-    layout = PackedFP8Layout(len(counts) * per_request, page_size=page_size)
-    table = rng.permutation(layout.pages).reshape(len(counts), per_request)
+    pages = len(counts) * per_request
+    table = rng.permutation(pages).reshape(len(counts), per_request)
     table[2, 1] = -1
-    keys = jnp.asarray(rng.normal(size=(layout.pages * page_size, 128)), jnp.bfloat16)
-    pool, dequantized = _pack(keys, layout)
+    keys = jnp.asarray(rng.normal(size=(pages * page_size, 128)), jnp.bfloat16)
+    pool, dequantized = _pack(keys, pages, page_size)
     tokens = len(lengths)
     q = jnp.asarray(rng.normal(size=(tokens, 32, 128)), jnp.float8_e4m3fn)
     weights = jnp.asarray(rng.uniform(0.01, 0.1, (tokens, 32)), jnp.float32)
@@ -84,7 +82,6 @@ def test_paged_mqa_logits_matches_reference(page_size, max_model_len):
         max_model_len=max_model_len,
         q_scale=jnp.ones_like(weights),
         query_size=6,
-        cache_layout=layout,
     )
     scores = np.asarray(result)
 
